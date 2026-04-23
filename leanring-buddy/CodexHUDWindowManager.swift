@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 
 private enum OpenClickyHUDLayout {
-    static let width: CGFloat = 396
-    static let height: CGFloat = 301
-    static let minimumWidth: CGFloat = 396
-    static let minimumHeight: CGFloat = 301
+    static let width: CGFloat = 594
+    static let height: CGFloat = 452
+    static let minimumWidth: CGFloat = 594
+    static let minimumHeight: CGFloat = 452
 }
 
 @MainActor
