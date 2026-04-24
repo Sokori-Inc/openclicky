@@ -280,7 +280,7 @@ struct CodexAgentModeSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     settingsSection(
                         title: "Voice response model",
-                        subtitle: "Used for spoken OpenClicky replies. Anthropic and OpenAI options both receive your transcript and screen context."
+                        subtitle: "Used for spoken OpenClicky replies. Claude can use local Claude Code sign-in when no Anthropic key is set."
                     ) {
                         modelOptionGrid(
                             options: OpenClickyModelCatalog.voiceResponseModels,
@@ -302,7 +302,7 @@ struct CodexAgentModeSettingsSheet: View {
 
                     settingsSection(
                         title: "Coding and actions model",
-                        subtitle: "Used when you say \"Hey Agent\", \"Clicky Agent\", or \"OpenClicky Agent\". These run through the bundled Codex runtime, which requires OpenAI Responses-compatible models."
+                        subtitle: "Used when you say \"Hey Agent\", \"Clicky Agent\", or \"OpenClicky Agent\". The bundled Codex runtime uses local ChatGPT sign-in when no OpenAI key is set."
                     ) {
                         modelOptionGrid(
                             options: OpenClickyModelCatalog.codexActionsModels,
@@ -313,7 +313,7 @@ struct CodexAgentModeSettingsSheet: View {
 
                     settingsSection(
                         title: "API keys",
-                        subtitle: "Optional local overrides. Leave a field blank to use the app bundle, launch environment, or local development secrets file."
+                        subtitle: "Optional overrides. Leave Anthropic or Codex blank to use local Claude Code or Codex sign-in when available."
                     ) {
                         VStack(spacing: 7) {
                             settingsSecureField(

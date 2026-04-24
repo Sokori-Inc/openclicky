@@ -12,7 +12,6 @@ final class CodexHomeManager {
     let modelInstructionsFileName = "OpenClickyModelInstructions.md"
     let bundledSkillsDirectoryName = "OpenClickyBundledSkills"
     let bundledWikiSeedDirectoryName = "OpenClickyBundledWikiSeed"
-    let modelProviderID = ClickyCodexConfigTemplate.defaultModelProviderID
 
     let fileManager: FileManager
     let applicationSupportDirectory: URL
@@ -38,6 +37,12 @@ final class CodexHomeManager {
 
     var codexHomeDirectory: URL {
         applicationSupportDirectory.appendingPathComponent("CodexHome", isDirectory: true)
+    }
+
+    var modelProviderID: String {
+        ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL)
+            ? ClickyCodexConfigTemplate.defaultModelProviderID
+            : ClickyCodexConfigTemplate.customModelProviderID
     }
 
     func prepare(bundle: Bundle = .main) throws -> CodexHomeLayout {
@@ -81,6 +86,7 @@ final class CodexHomeManager {
         )
         let configFile = home.appendingPathComponent("config.toml", isDirectory: false)
         try config.render().write(to: configFile, atomically: true, encoding: .utf8)
+        try copyDefaultCodexAuthIfAvailable(to: home)
 
         return CodexHomeLayout(
             homeDirectory: home,
@@ -104,6 +110,21 @@ final class CodexHomeManager {
         }
 
         return nil
+    }
+
+    private func copyDefaultCodexAuthIfAvailable(to home: URL) throws {
+        guard ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL) else { return }
+        guard AppBundleConfiguration.openAIAPIKey() == nil else { return }
+
+        let destination = home.appendingPathComponent("auth.json", isDirectory: false)
+        guard !fileManager.fileExists(atPath: destination.path) else { return }
+
+        let source = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("auth.json", isDirectory: false)
+        guard fileManager.fileExists(atPath: source.path) else { return }
+
+        try fileManager.copyItem(at: source, to: destination)
     }
 
     private func copyReplacingItem(at source: URL, to destination: URL) throws {

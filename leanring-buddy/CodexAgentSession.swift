@@ -238,6 +238,8 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             hasInitializedProcess = true
         }
 
+        try await ensureCodexAuthentication()
+
         let baseInstructions = (try? String(contentsOf: layout.modelInstructionsFile, encoding: .utf8))
             ?? "You are OpenClicky, a friendly macOS cursor companion with Codex Agent Mode."
         let developerInstructions = """
@@ -269,6 +271,29 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         } else {
             throw CodexRPCError(message: "Codex app-server did not return a thread id.")
         }
+    }
+
+    private func ensureCodexAuthentication() async throws {
+        guard homeManager.modelProviderID == ClickyCodexConfigTemplate.defaultModelProviderID else { return }
+
+        let accountRead = try await processManager.sendRequest(method: "account/read", params: [
+            "refreshToken": false
+        ])
+
+        if CodexJSON.dictionary(accountRead["account"]) != nil {
+            return
+        }
+
+        let loginStart = try await processManager.sendRequest(method: "account/login/start", params: [
+            "type": "chatgpt"
+        ])
+
+        if let authURLString = CodexJSON.string(loginStart["authUrl"]),
+           let authURL = URL(string: authURLString) {
+            NSWorkspace.shared.open(authURL)
+        }
+
+        throw CodexRPCError(message: "OpenClicky found no Codex ChatGPT login. Finish the Codex sign-in that just opened, then start the Agent task again.")
     }
 
     private func handleNotification(_ notification: [String: Any]) {
@@ -308,6 +333,14 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             lastErrorMessage = text
             status = .failed(text)
             entries.append(CodexTranscriptEntry(role: .system, text: text))
+        case "account/login/completed":
+            if CodexJSON.bool(params["success"]) == true {
+                entries.append(CodexTranscriptEntry(role: .system, text: "Codex ChatGPT sign-in completed. Start the Agent task again."))
+            } else if let text = CodexJSON.string(params["error"]), !text.isEmpty {
+                lastErrorMessage = text
+                status = .failed(text)
+                entries.append(CodexTranscriptEntry(role: .system, text: text))
+            }
         default:
             break
         }

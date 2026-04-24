@@ -40,9 +40,9 @@ final class CodexProcessManager {
         )
 
         if environment["OPENAI_API_KEY"]?.isEmpty != false,
-           let userDefaultAPIKey = UserDefaults.standard.string(forKey: AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey),
-           !userDefaultAPIKey.isEmpty {
-            environment["OPENAI_API_KEY"] = userDefaultAPIKey
+           let configuredAPIKey = AppBundleConfiguration.openAIAPIKey(),
+           !configuredAPIKey.isEmpty {
+            environment["OPENAI_API_KEY"] = configuredAPIKey
         }
 
         process.environment = environment

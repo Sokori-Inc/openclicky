@@ -1,7 +1,8 @@
 import Foundation
 
 struct ClickyCodexConfigTemplate: Equatable {
-    static let defaultModelProviderID = "openclicky"
+    static let defaultModelProviderID = "openai"
+    static let customModelProviderID = "openclicky"
 
     var model: String
     var reasoningEffort: String
@@ -33,12 +34,16 @@ struct ClickyCodexConfigTemplate: Equatable {
         return workerBaseURL.appendingPathComponent("v1", isDirectory: false)
     }
 
+    var modelProviderID: String {
+        ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL) ? Self.defaultModelProviderID : Self.customModelProviderID
+    }
+
     func render() -> String {
         var lines: [String] = [
             "model = \"\(escape(model))\"",
             "model_reasoning_effort = \"\(escape(reasoningEffort))\"",
-            "model_provider = \"\(Self.defaultModelProviderID)\"",
-            "preferred_auth_method = \"apikey\"",
+            "model_provider = \"\(modelProviderID)\"",
+            "preferred_auth_method = \"\(preferredAuthMethod)\"",
             "approval_policy = \"never\"",
             "sandbox_mode = \"danger-full-access\"",
             "personality = \"friendly\"",
@@ -46,18 +51,23 @@ struct ClickyCodexConfigTemplate: Equatable {
             "history.persistence = \"save-all\"",
             "",
             "[analytics]",
-            "enabled = false",
-            "",
-            "[model_providers.\(Self.defaultModelProviderID)]",
-            "name = \"OpenClicky\"",
-            "env_key = \"OPENAI_API_KEY\"",
-            "base_url = \"\(escape(openAICompatibleEndpoint.absoluteString))\"",
-            "wire_api = \"responses\"",
-            "trust_level = \"trusted\"",
-            "hide_full_access_warning = true",
-            "fast_mode = true",
-            "multi_agent = true"
+            "enabled = false"
         ]
+
+        if !ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL) {
+            lines.append(contentsOf: [
+                "",
+                "[model_providers.\(Self.customModelProviderID)]",
+                "name = \"OpenClicky\"",
+                "env_key = \"OPENAI_API_KEY\"",
+                "base_url = \"\(escape(openAICompatibleEndpoint.absoluteString))\"",
+                "wire_api = \"responses\"",
+                "trust_level = \"trusted\"",
+                "hide_full_access_warning = true",
+                "fast_mode = true",
+                "multi_agent = true"
+            ])
+        }
 
         if includeOpenAIDeveloperDocsMCP {
             lines.append(contentsOf: [
@@ -76,6 +86,10 @@ struct ClickyCodexConfigTemplate: Equatable {
         ])
 
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private var preferredAuthMethod: String {
+        ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL) ? "chatgpt" : "apikey"
     }
 
     private func escape(_ value: String) -> String {
@@ -102,5 +116,20 @@ enum ClickyCodexBackend {
         }
 
         return defaultOpenAIBaseURL
+    }
+
+    static func isDefaultOpenAIBaseURL(_ url: URL) -> Bool {
+        normalizedBaseURL(url) == normalizedBaseURL(defaultOpenAIBaseURL)
+    }
+
+    private static func normalizedBaseURL(_ url: URL) -> String {
+        var normalized = url.absoluteString
+        while normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        if !normalized.hasSuffix("/v1") {
+            normalized += "/v1"
+        }
+        return normalized.lowercased()
     }
 }

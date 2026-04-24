@@ -116,6 +116,10 @@ final class CompanionManager: ObservableObject {
         )
     }()
 
+    private lazy var claudeAgentSDKAPI: ClaudeAgentSDKAPI? = {
+        return ClaudeAgentSDKAPI(model: selectedModel)
+    }()
+
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(
             apiKey: Self.elevenLabsAPIKey,
@@ -201,6 +205,7 @@ final class CompanionManager: ObservableObject {
         selectedModel = resolvedModel
         UserDefaults.standard.set(resolvedModel, forKey: "selectedVoiceResponseModel")
         claudeAPI.model = resolvedModel
+        claudeAgentSDKAPI?.model = resolvedModel
         openAIAPI.model = resolvedModel
     }
 
@@ -1534,15 +1539,14 @@ final class CompanionManager: ObservableObject {
 
         switch selectedVoiceResponseModel.provider {
         case .anthropic:
-            claudeAPI.model = selectedVoiceResponseModel.id
-            let (text, _) = try await claudeAPI.analyzeImageStreaming(
+            return try await analyzeClaudeResponse(
                 images: images,
+                model: selectedVoiceResponseModel.id,
                 systemPrompt: systemPrompt,
                 conversationHistory: conversationHistory,
                 userPrompt: userPrompt,
                 onTextChunk: onTextChunk
             )
-            return text
         case .openAI:
             openAIAPI.model = selectedVoiceResponseModel.id
             let (text, _) = try await openAIAPI.analyzeImage(
@@ -1554,6 +1558,45 @@ final class CompanionManager: ObservableObject {
             await onTextChunk(text)
             return text
         }
+    }
+
+    private func analyzeClaudeResponse(
+        images: [(data: Data, label: String)],
+        model: String,
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable (String) -> Void
+    ) async throws -> String {
+        if AppBundleConfiguration.anthropicAPIKey() != nil {
+            claudeAPI.model = model
+            let (text, _) = try await claudeAPI.analyzeImageStreaming(
+                images: images,
+                systemPrompt: systemPrompt,
+                conversationHistory: conversationHistory,
+                userPrompt: userPrompt,
+                onTextChunk: onTextChunk
+            )
+            return text
+        }
+
+        guard let claudeAgentSDKAPI else {
+            throw NSError(
+                domain: "ClaudeAgentSDKAPI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Claude is not configured. Sign in to Claude Code locally or set an Anthropic API key."]
+            )
+        }
+
+        claudeAgentSDKAPI.model = model
+        let (text, _) = try await claudeAgentSDKAPI.analyzeImageStreaming(
+            images: images,
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt,
+            onTextChunk: onTextChunk
+        )
+        return text
     }
 
     private func captureAllScreensForVoiceResponseIfAvailable() async throws -> [CompanionScreenCapture] {
@@ -1883,9 +1926,9 @@ final class CompanionManager: ObservableObject {
                 let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
                 let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
 
-                claudeAPI.model = selectedComputerUseModel
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                let fullResponseText = try await analyzeClaudeResponse(
                     images: labeledImages,
+                    model: selectedComputerUseModel,
                     systemPrompt: Self.onboardingDemoSystemPrompt,
                     userPrompt: "look around my screen and find something interesting to point at",
                     onTextChunk: { _ in }

@@ -14,16 +14,32 @@ struct CodexAgentModeTests {
         let rendered = template.render()
 
         #expect(rendered.contains("model = \"gpt-5.4\""))
-        #expect(rendered.contains("model_provider = \"openclicky\""))
-        #expect(ClickyCodexConfigTemplate.defaultModelProviderID == "openclicky")
-        #expect(rendered.contains("base_url = \"https://api.openai.com/v1\""))
-        #expect(rendered.contains("name = \"OpenClicky\""))
-        #expect(rendered.contains("wire_api = \"responses\""))
-        #expect(rendered.contains("multi_agent = true"))
+        #expect(rendered.contains("model_provider = \"openai\""))
+        #expect(rendered.contains("preferred_auth_method = \"chatgpt\""))
+        #expect(ClickyCodexConfigTemplate.defaultModelProviderID == "openai")
+        #expect(!rendered.contains("[model_providers.openclicky]"))
         #expect(rendered.contains("model_instructions_file = \"OpenClickyModelInstructions.md\""))
         #expect(rendered.contains("bundled_skills_dir = \"OpenClickyBundledSkills\""))
         #expect(rendered.contains("enabled = true"))
         #expect(rendered.contains("https://developers.openai.com/mcp"))
+    }
+
+    @Test func codexConfigKeepsCustomResponsesBackendAPIKeyBackcompat() throws {
+        let template = ClickyCodexConfigTemplate(
+            model: "gpt-5.4",
+            reasoningEffort: "medium",
+            workerBaseURL: URL(string: "https://worker.example.test/openai")!,
+            includeOpenAIDeveloperDocsMCP: false
+        )
+
+        let rendered = template.render()
+
+        #expect(rendered.contains("model_provider = \"openclicky\""))
+        #expect(rendered.contains("preferred_auth_method = \"apikey\""))
+        #expect(rendered.contains("[model_providers.openclicky]"))
+        #expect(rendered.contains("base_url = \"https://worker.example.test/openai/v1\""))
+        #expect(rendered.contains("wire_api = \"responses\""))
+        #expect(rendered.contains("multi_agent = true"))
     }
 
     @Test func codexHomeManagerUsesOpenClickyResourceNames() throws {
