@@ -44,6 +44,11 @@ private struct OpenClickyAppOpenRequest {
     let instruction: String
 }
 
+private struct OpenClickyNativeTypeRequest {
+    let text: String
+    let targetDescription: String
+}
+
 @MainActor
 final class CompanionManager: ObservableObject {
     @Published private(set) var voiceState: CompanionVoiceState = .idle
@@ -94,6 +99,7 @@ final class CompanionManager: ObservableObject {
     let agentDockWindowManager = ClickyAgentDockWindowManager()
     let settingsWindowManager = OpenClickySettingsWindowManager()
     let logViewerWindowManager = OpenClickyLogViewerWindowManager()
+    let widgetStateStore = OpenClickyWidgetStateStore()
     let codexHomeManager = CodexHomeManager()
     let nativeComputerUseController = OpenClickyNativeComputerUseController()
     @Published private(set) var codexAgentSessions: [CodexAgentSession]
@@ -257,6 +263,37 @@ final class CompanionManager: ObservableObject {
 
     func showLogViewerWindow() {
         logViewerWindowManager.show()
+    }
+
+    func publishWidgetSnapshot() {
+        widgetStateStore.publishSnapshot(from: self)
+    }
+
+    func scheduleWidgetSnapshotPublish() {
+        widgetStateStore.scheduleSnapshotPublish(from: self)
+    }
+
+    func handleWidgetDeepLink(_ url: URL) {
+        guard url.scheme == "openclicky" else { return }
+
+        switch url.host {
+        case "agents":
+            showCodexHUD()
+        case "agent":
+            if let sessionIDString = url.pathComponents.dropFirst().first,
+               let sessionID = UUID(uuidString: sessionIDString) {
+                selectCodexAgentSession(sessionID)
+            }
+            showCodexHUD()
+        case "settings":
+            showSettingsWindow()
+        case "logs":
+            showLogViewerWindow()
+        case "memory":
+            showMemoryWindow()
+        default:
+            showSettingsWindow()
+        }
     }
 
     func setTutorModeEnabled(_ enabled: Bool) {
@@ -737,14 +774,17 @@ final class CompanionManager: ObservableObject {
         agentStatusCancellables[session.id] = session.$status
             .receive(on: DispatchQueue.main)
             .sink { [weak self, sessionID = session.id] status in
-                self?.updateAgentDockItem(for: sessionID, status: status)
+                guard let self else { return }
+                self.updateAgentDockItem(for: sessionID, status: status)
+                self.scheduleWidgetSnapshotPublish()
             }
 
         agentActivityCancellables[session.id] = session.$entries
             .receive(on: DispatchQueue.main)
             .sink { [weak self, sessionID = session.id, weak session] _ in
-                guard let session else { return }
-                self?.updateAgentDockItem(for: sessionID, status: session.status)
+                guard let self, let session else { return }
+                self.updateAgentDockItem(for: sessionID, status: session.status)
+                self.scheduleWidgetSnapshotPublish()
             }
     }
 
@@ -759,6 +799,7 @@ final class CompanionManager: ObservableObject {
         codexAgentSessions.append(session)
         observeCodexAgentSession(session)
         activeCodexAgentSessionID = session.id
+        scheduleWidgetSnapshotPublish()
         return session
     }
 
@@ -885,6 +926,11 @@ final class CompanionManager: ObservableObject {
                 return true
             }
 
+            if let typeRequest = Self.nativeTypeRequest(from: taskCreationInstruction) {
+                typeTextUsingNativeComputerUse(typeRequest)
+                return true
+            }
+
             print("OpenClicky agent task creation request detected: \(taskCreationInstruction)")
             startVoiceAgentTask(instruction: taskCreationInstruction)
             return true
@@ -905,6 +951,11 @@ final class CompanionManager: ObservableObject {
             }
 
             let instruction = Self.normalizedAgentTaskInstruction(from: explicitInstruction)
+            if let typeRequest = Self.nativeTypeRequest(from: instruction) {
+                typeTextUsingNativeComputerUse(typeRequest)
+                return true
+            }
+
             if let appOpenRequest = Self.localAppOpenRequest(from: instruction) {
                 openRequestedApplication(appOpenRequest)
                 return true
@@ -926,6 +977,17 @@ final class CompanionManager: ObservableObject {
 
         if Self.isIncompleteLocalAppOpenRequest(from: transcript) {
             speakShortSystemResponse("what app should I open?")
+            return true
+        }
+
+        if let typeRequest = Self.nativeTypeRequest(from: transcript) {
+            typeTextUsingNativeComputerUse(typeRequest)
+            return true
+        }
+
+        if let liveLookupInstruction = Self.implicitLiveLookupInstruction(from: transcript) {
+            print("OpenClicky live lookup request detected; starting agent task: \(liveLookupInstruction)")
+            startVoiceAgentTask(instruction: liveLookupInstruction)
             return true
         }
 
@@ -963,6 +1025,51 @@ final class CompanionManager: ObservableObject {
 
         print("OpenClicky app open fallback to Agent Mode: \(request.instruction)")
         startVoiceAgentTask(instruction: request.instruction)
+    }
+
+    private func typeTextUsingNativeComputerUse(_ request: OpenClickyNativeTypeRequest) {
+        interruptCurrentVoiceResponse()
+
+        if !nativeComputerUseController.isEnabled {
+            nativeComputerUseController.setEnabled(true)
+        }
+
+        guard let targetWindow = nativeComputerUseController.refreshFocusedTarget() else {
+            speakShortSystemResponse("i don't have a target window to type into.")
+            return
+        }
+
+        do {
+            try nativeComputerUseController.typeText(request.text, delayMilliseconds: 10, toPid: targetWindow.pid)
+            let target = targetWindow.owner.trimmingCharacters(in: .whitespacesAndNewlines)
+            let acknowledgement = target.isEmpty ? "typed that into the focused window." : "typed that into \(target)."
+            latestVoiceResponseCard = ClickyResponseCard(
+                source: .voice,
+                rawText: acknowledgement,
+                contextTitle: request.targetDescription
+            )
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "outgoing",
+                event: "native_cua.type_text",
+                fields: [
+                    "target": targetWindow.agentContextNote,
+                    "textLength": request.text.count
+                ]
+            )
+            speakShortSystemResponse(acknowledgement)
+        } catch {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "error",
+                event: "native_cua.type_text_error",
+                fields: [
+                    "target": targetWindow.agentContextNote,
+                    "error": error.localizedDescription
+                ]
+            )
+            speakShortSystemResponse("native typing hit a blocker: \(error.localizedDescription)")
+        }
     }
 
     private func launchApplication(named appName: String) -> Bool {
@@ -1326,6 +1433,7 @@ final class CompanionManager: ObservableObject {
 
         let prefixPatterns = [
             #"(?i)^\s*(?:hey|ok|okay|right|so)[\s,]+"#,
+            #"(?i)^\s*(?:clicky|openclicky)[\s,]+"#,
             #"(?i)^\s*(?:let's|lets)\s+try\s+(?:that|this)\s+again[\s,]+"#
         ]
 
@@ -1391,6 +1499,80 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private static func nativeTypeRequest(from transcript: String) -> OpenClickyNativeTypeRequest? {
+        let candidate = normalizedCommandCandidate(from: transcript)
+        guard !candidate.isEmpty else { return nil }
+
+        let patterns = [
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:type|write|enter|input)\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field)\s+(.+?)[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:type|write|enter|input)\s+(.+?)(?:\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field))?[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?paste\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field)\s+(.+?)[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?paste\s+(.+?)(?:\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field))?[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            guard let match = regex.firstMatch(in: candidate, range: range),
+                  let textRange = Range(match.range(at: 1), in: candidate) else { continue }
+
+            var text = String(candidate[textRange])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,:;!? "))
+
+            text = stripMatchingQuotes(from: text)
+            guard !text.isEmpty, !isTypePlaceholder(text) else { return nil }
+
+            return OpenClickyNativeTypeRequest(
+                text: text,
+                targetDescription: candidate
+            )
+        }
+
+        return nil
+    }
+
+    private static func stripMatchingQuotes(from value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2,
+              let first = trimmed.first,
+              let last = trimmed.last else {
+            return trimmed
+        }
+
+        let quotePairs: [(Character, Character)] = [
+            ("\"", "\""),
+            ("'", "'"),
+            ("“", "”"),
+            ("‘", "’")
+        ]
+
+        for pair in quotePairs where first == pair.0 && last == pair.1 {
+            return String(trimmed.dropFirst().dropLast())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return trimmed
+    }
+
+    private static func isTypePlaceholder(_ value: String) -> Bool {
+        let normalized = value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return [
+            "something",
+            "text",
+            "this",
+            "that",
+            "into the window",
+            "in the window",
+            "into the field",
+            "in the field"
+        ].contains(normalized)
+    }
+
     private static func applicationBundleIdentifier(for appName: String) -> String? {
         switch appName {
         case "Google Chrome":
@@ -1454,6 +1636,99 @@ final class CompanionManager: ObservableObject {
         return nil
     }
 
+    private static func implicitLiveLookupInstruction(from transcript: String) -> String? {
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return nil }
+
+        let normalizedTranscript = trimmedTranscript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let liveLookupSignals = [
+            "weather",
+            "latest",
+            "current",
+            "right now",
+            "today",
+            "news",
+            "price",
+            "stock",
+            "score",
+            "fixture",
+            "schedule",
+            "exchange rate",
+            "what's happening",
+            "whats happening",
+            "look up",
+            "search for",
+            "find out"
+        ]
+
+        guard liveLookupSignals.contains(where: { normalizedTranscript.contains($0) }) else { return nil }
+        return "Research the current answer to this request and report back concisely: \(trimmedTranscript)"
+    }
+
+    private static func mentionsOpenClickyRuntimeStorage(_ transcript: String) -> Bool {
+        let normalizedTranscript = transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let mentionsOpenClicky = normalizedTranscript.contains("openclicky")
+            || normalizedTranscript.contains("clicky")
+            || normalizedTranscript.contains("agent")
+            || normalizedTranscript.contains("agents")
+
+        guard mentionsOpenClicky else { return false }
+
+        let storageTerms = [
+            "log",
+            "logs",
+            "memory",
+            "memories",
+            "skill",
+            "skills",
+            "widget",
+            "widgets",
+            "config",
+            "settings",
+            "session",
+            "sessions",
+            "soul",
+            "persona",
+            "identity",
+            "who you are",
+            "who are you",
+            "review comments",
+            "where",
+            "stored",
+            "storage"
+        ]
+
+        return storageTerms.contains { normalizedTranscript.contains($0) }
+    }
+
+    private static func shouldEscalateVoiceResponseToAgent(responseText: String, transcript: String) -> Bool {
+        let normalizedResponse = responseText
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let refusalSignals = [
+            "can't",
+            "cannot",
+            "not able",
+            "not wired",
+            "don't have access",
+            "do not have access",
+            "no access"
+        ]
+
+        guard refusalSignals.contains(where: { normalizedResponse.contains($0) }) else { return false }
+
+        return implicitComputerUseInstruction(from: transcript) != nil
+            || implicitLiveLookupInstruction(from: transcript) != nil
+            || mentionsOpenClickyRuntimeStorage(transcript)
+    }
+
     private static func beginsWithInstructionQuestion(_ tokens: [String]) -> Bool {
         guard let firstToken = tokens.first else { return false }
         switch firstToken {
@@ -1499,7 +1774,7 @@ final class CompanionManager: ObservableObject {
 
     private static func isComputerUseActionVerb(_ token: String) -> Bool {
         switch token {
-        case "open", "launch", "start", "switch", "close", "quit", "click", "press", "type", "scroll", "drag", "move", "select", "choose", "use", "search", "browse", "research", "find":
+        case "open", "launch", "start", "switch", "close", "quit", "click", "press", "type", "scroll", "drag", "move", "select", "choose", "use", "search", "browse", "research", "find", "look", "show", "view", "inspect", "read", "list", "create", "make", "do", "take", "add", "write", "draft", "edit", "update", "save", "fix", "build", "install", "configure", "set", "send", "download", "upload", "review", "check", "test", "run", "summarize", "clean", "remove", "delete":
             return true
         default:
             return false
@@ -1546,6 +1821,7 @@ final class CompanionManager: ObservableObject {
         if agentDockItems.count > 6 {
             agentDockItems.removeFirst(agentDockItems.count - 6)
         }
+        scheduleWidgetSnapshotPublish()
         OpenClickyMessageLogStore.shared.append(
             lane: "agent",
             direction: "outgoing",
@@ -1645,6 +1921,7 @@ final class CompanionManager: ObservableObject {
         case .stopped:
             break
         }
+        scheduleWidgetSnapshotPublish()
     }
 
     func openAgentDockItem(_ itemID: UUID) {
@@ -1919,8 +2196,14 @@ final class CompanionManager: ObservableObject {
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - OpenClicky can open apps and use the computer through Agent Mode. direct action requests like "open chrome", "click that", "type this", "scroll down", or "switch to safari" are normally routed to Agent Mode before you answer. if the user asks whether you can do those things, say yes: OpenClicky can do that through Agent Mode.
+    - OpenClicky has durable local storage for logs, memory, learned skills, widget state, sessions, and config. if the user asks where those live, answer from the runtime storage context included below.
+    - OpenClicky has a SOUL.md persona file. if the user asks who OpenClicky is, how it should behave, or to change its persona, use the soul path from runtime storage and route edits to Agent Mode.
+    - if the user asks to view, edit, review, tune, fix, or inspect OpenClicky's logs, memory, learned skills, widget state, sessions, config, or review comments, return exactly [AGENT_TASK: the task the agent should do] and no other text.
+    - if the user asks to optimize skills, audit skills, review logs for learnings, or see what OpenClicky can learn from logs, return exactly [AGENT_TASK: inspect the relevant OpenClicky files, archive old versions as backups, then create or update the memory, learned skills, or review notes needed] and no other text.
+    - old OpenClicky artifacts should be archived as backups before replacement. do not suggest deleting old logs, memory, skills, prompts, or notes unless the user explicitly asks for destructive deletion.
     - if the user asks you to create, start, spawn, run, launch, or set up an agent task and that request reaches this voice model, do not say you will do it in normal prose. return exactly [AGENT_TASK: the task the agent should do] and no other text. OpenClicky will create the background agent from that directive.
-    - you do not have live web, search, or weather tools in this voice path. for current weather, live news, prices, schedules, or anything time-sensitive that is not visible on screen, say that live lookup is not wired into voice yet and suggest using agent mode for a live research task. do not invent current weather.
+    - for current weather, live news, prices, schedules, or anything time-sensitive that is not visible on screen, return exactly [AGENT_TASK: research the current answer to the user's request and report back concisely] and no other text. do not say live lookup is not wired in and do not invent current information.
+    - if the right answer would be "i can't do that from voice", return an [AGENT_TASK: ...] directive instead, unless the missing thing is a real blocker like a permission, credential, or required file.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
@@ -1946,6 +2229,26 @@ final class CompanionManager: ObservableObject {
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
+
+    private func runtimeStorageContextForVoicePrompt() -> String {
+        let logs = OpenClickyMessageLogStore.shared
+        return """
+        OpenClicky runtime storage:
+        - runtime map: \(codexHomeManager.runtimeMapFile.path)
+        - soul/persona: \(codexHomeManager.soulFile.path)
+        - codex home: \(codexHomeManager.codexHomeDirectory.path)
+        - persistent memory: \(codexHomeManager.persistentMemoryFile.path)
+        - memory articles: \(codexHomeManager.memoriesDirectory.path)
+        - learned skills: \(codexHomeManager.learnedSkillsDirectory.path)
+        - bundled skills: \(codexHomeManager.codexHomeDirectory.appendingPathComponent(codexHomeManager.bundledSkillsDirectoryName, isDirectory: true).path)
+        - archives: \(codexHomeManager.archivesDirectory.path)
+        - logs directory: \(logs.logDirectory.path)
+        - current message log: \(logs.currentLogFile.path)
+        - log review comments: \(logs.agentReviewCommentsFile.path)
+        - log review jsonl: \(logs.reviewCommentsFile.path)
+        - widget snapshot: \(OpenClickyWidgetStateStore.snapshotURL.path)
+        """
+    }
 
     private static let tutorModeSystemPrompt = """
     you're OpenClicky in tutor mode. the user wants to learn the app or workflow currently on screen, and you can see their focused window.
@@ -2012,6 +2315,8 @@ final class CompanionManager: ObservableObject {
                 let voiceSystemPrompt = """
                 \(Self.companionVoiceResponseSystemPrompt)
 
+                \(runtimeStorageContextForVoicePrompt())
+
                 persistent memory:
                 read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
 
@@ -2032,6 +2337,11 @@ final class CompanionManager: ObservableObject {
 
                 if let agentInstruction = Self.agentTaskDirective(from: fullResponseText) {
                     startVoiceAgentTask(instruction: agentInstruction)
+                    return
+                }
+
+                if Self.shouldEscalateVoiceResponseToAgent(responseText: fullResponseText, transcript: transcript) {
+                    startVoiceAgentTask(instruction: transcript)
                     return
                 }
 
@@ -2128,6 +2438,7 @@ final class CompanionManager: ObservableObject {
                     rawText: spokenText,
                     contextTitle: transcript
                 )
+                self.scheduleWidgetSnapshotPublish()
 
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.

@@ -94,6 +94,10 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
     @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
     @AppStorage(AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey) private var userDeepgramAPIKey = ""
+    @AppStorage(AppBundleConfiguration.userWidgetsEnabledDefaultsKey) private var widgetsEnabled = false
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeAgentTaskNamesDefaultsKey) private var widgetsIncludeAgentTaskNames = false
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeMemorySnippetsDefaultsKey) private var widgetsIncludeMemorySnippets = false
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeFocusedAppContextDefaultsKey) private var widgetsIncludeFocusedAppContext = false
     @State private var selectedSection: OpenClickySettingsSection = .general
 
     init(companionManager: CompanionManager) {
@@ -566,6 +570,61 @@ struct OpenClickySettingsView: View {
                 }
                 actionRow(title: "Open logs folder", systemImageName: "folder") {
                     openLogsFolder()
+                }
+            }
+
+            settingsGroup("Widgets") {
+                toggleRow(
+                    title: "Enable desktop widgets",
+                    subtitle: "Publishes a compact OpenClicky snapshot for WidgetKit.",
+                    systemImageName: "rectangle.grid.1x2",
+                    isOn: Binding(
+                        get: { widgetsEnabled },
+                        set: { newValue in
+                            widgetsEnabled = newValue
+                            companionManager.publishWidgetSnapshot()
+                        }
+                    )
+                )
+                toggleRow(
+                    title: "Show agent task names",
+                    subtitle: "Allows widgets to display task titles and short captions.",
+                    systemImageName: "text.alignleft",
+                    isOn: Binding(
+                        get: { widgetsIncludeAgentTaskNames },
+                        set: { newValue in
+                            widgetsIncludeAgentTaskNames = newValue
+                            companionManager.publishWidgetSnapshot()
+                        }
+                    )
+                )
+                toggleRow(
+                    title: "Show memory snippets",
+                    subtitle: "Allows widgets to show a compact recent memory summary.",
+                    systemImageName: "brain.head.profile",
+                    isOn: Binding(
+                        get: { widgetsIncludeMemorySnippets },
+                        set: { newValue in
+                            widgetsIncludeMemorySnippets = newValue
+                            companionManager.publishWidgetSnapshot()
+                        }
+                    )
+                )
+                toggleRow(
+                    title: "Show focused-app context",
+                    subtitle: "Reserved for future focus widgets. Keep off unless you want desktop context shown.",
+                    systemImageName: "macwindow",
+                    isOn: Binding(
+                        get: { widgetsIncludeFocusedAppContext },
+                        set: { newValue in
+                            widgetsIncludeFocusedAppContext = newValue
+                            companionManager.publishWidgetSnapshot()
+                        }
+                    )
+                )
+                actionRow(title: "Open widget snapshot", systemImageName: "doc.text.magnifyingglass") {
+                    companionManager.publishWidgetSnapshot()
+                    NSWorkspace.shared.open(OpenClickyWidgetStateStore.snapshotURL)
                 }
             }
 

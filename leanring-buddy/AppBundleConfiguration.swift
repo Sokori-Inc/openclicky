@@ -17,6 +17,11 @@ enum AppBundleConfiguration {
     static let userVoiceTranscriptionProviderDefaultsKey = "openClickyVoiceTranscriptionProvider"
     static let userAdvancedModeDefaultsKey = "openClickyAdvancedModeEnabled"
     static let userNativeComputerUseDefaultsKey = "openClickyNativeComputerUseEnabled"
+    static let userWidgetsEnabledDefaultsKey = "openClickyWidgetsEnabled"
+    static let userWidgetsIncludeAgentTaskNamesDefaultsKey = "openClickyWidgetsIncludeAgentTaskNames"
+    static let userWidgetsIncludeMemorySnippetsDefaultsKey = "openClickyWidgetsIncludeMemorySnippets"
+    static let userWidgetsIncludeFocusedAppContextDefaultsKey = "openClickyWidgetsIncludeFocusedAppContext"
+    static let appGroupIdentifier = "group.com.jkneen.openclicky"
 
     static func postHogAPIKey() -> String? {
         stringValue(

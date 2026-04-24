@@ -3,15 +3,20 @@ import Foundation
 struct CodexHomeLayout: Equatable {
     let homeDirectory: URL
     let configFile: URL
+    let soulFile: URL
     let modelInstructionsFile: URL
+    let runtimeMapFile: URL
     let bundledSkillsDirectory: URL
     let learnedSkillsDirectory: URL
     let bundledWikiSeedDirectory: URL
     let persistentMemoryFile: URL
+    let archivesDirectory: URL
 }
 
 final class CodexHomeManager {
+    let soulFileName = "SOUL.md"
     let modelInstructionsFileName = "OpenClickyModelInstructions.md"
+    let runtimeMapFileName = "OpenClickyRuntimeMap.md"
     let bundledSkillsDirectoryName = "OpenClickyBundledSkills"
     let learnedSkillsDirectoryName = "OpenClickyLearnedSkills"
     let bundledWikiSeedDirectoryName = "OpenClickyBundledWikiSeed"
@@ -51,8 +56,20 @@ final class CodexHomeManager {
         codexHomeDirectory.appendingPathComponent(learnedSkillsDirectoryName, isDirectory: true)
     }
 
+    var archivesDirectory: URL {
+        codexHomeDirectory.appendingPathComponent("archives", isDirectory: true)
+    }
+
     var persistentMemoryFile: URL {
         codexHomeDirectory.appendingPathComponent(persistentMemoryFileName, isDirectory: false)
+    }
+
+    var runtimeMapFile: URL {
+        codexHomeDirectory.appendingPathComponent(runtimeMapFileName, isDirectory: false)
+    }
+
+    var soulFile: URL {
+        codexHomeDirectory.appendingPathComponent(soulFileName, isDirectory: false)
     }
 
     var modelProviderID: String {
@@ -67,7 +84,16 @@ final class CodexHomeManager {
         try fileManager.createDirectory(at: home.appendingPathComponent("sessions", isDirectory: true), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: memoriesDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: learnedSkillsDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: archivesDirectory, withIntermediateDirectories: true)
+        OpenClickyMessageLogStore.shared.ensureAgentReviewCommentsFile()
         try ensurePersistentMemoryFile()
+
+        let soul = soulFile
+        if let source = resourceURL(named: soulFileName, bundle: bundle) {
+            try copyReplacingItem(at: source, to: soul)
+        } else if !fileManager.fileExists(atPath: soul.path) {
+            try "OpenClicky is a voice-first macOS companion with durable memory and background Agent Mode.\n".write(to: soul, atomically: true, encoding: .utf8)
+        }
 
         let modelInstructions = home.appendingPathComponent(modelInstructionsFileName, isDirectory: false)
         if let source = resourceURL(named: modelInstructionsFileName, bundle: bundle) {
@@ -105,16 +131,28 @@ final class CodexHomeManager {
         )
         let configFile = home.appendingPathComponent("config.toml", isDirectory: false)
         try config.render().write(to: configFile, atomically: true, encoding: .utf8)
+        try writeRuntimeMap(
+            home: home,
+            configFile: configFile,
+            soulFile: soul,
+            modelInstructionsFile: modelInstructions,
+            bundledSkillsDirectory: skills,
+            learnedSkillsDirectory: learnedSkillsDirectory,
+            bundledWikiSeedDirectory: wikiSeed
+        )
         try copyDefaultCodexAuthIfAvailable(to: home)
 
         return CodexHomeLayout(
             homeDirectory: home,
             configFile: configFile,
+            soulFile: soul,
             modelInstructionsFile: modelInstructions,
+            runtimeMapFile: runtimeMapFile,
             bundledSkillsDirectory: skills,
             learnedSkillsDirectory: learnedSkillsDirectory,
             bundledWikiSeedDirectory: wikiSeed,
-            persistentMemoryFile: persistentMemoryFile
+            persistentMemoryFile: persistentMemoryFile,
+            archivesDirectory: archivesDirectory
         )
     }
 
@@ -254,9 +292,84 @@ final class CodexHomeManager {
 
     private func copyReplacingItem(at source: URL, to destination: URL) throws {
         if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
+            guard try !itemsAppearEqual(source, destination) else { return }
+            try archiveExistingItem(at: destination, reason: "runtime-replacement")
         }
         try fileManager.copyItem(at: source, to: destination)
+    }
+
+    private func itemsAppearEqual(_ first: URL, _ second: URL) throws -> Bool {
+        var firstIsDirectory: ObjCBool = false
+        var secondIsDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: first.path, isDirectory: &firstIsDirectory),
+              fileManager.fileExists(atPath: second.path, isDirectory: &secondIsDirectory),
+              firstIsDirectory.boolValue == secondIsDirectory.boolValue else {
+            return false
+        }
+
+        guard firstIsDirectory.boolValue else {
+            return fileManager.contentsEqual(atPath: first.path, andPath: second.path)
+        }
+
+        let firstSnapshot = try directorySnapshot(at: first)
+        let secondSnapshot = try directorySnapshot(at: second)
+        guard firstSnapshot == secondSnapshot else { return false }
+
+        for relativePath in firstSnapshot where !relativePath.hasSuffix("/") {
+            let firstFile = first.appendingPathComponent(relativePath, isDirectory: false)
+            let secondFile = second.appendingPathComponent(relativePath, isDirectory: false)
+            guard fileManager.contentsEqual(atPath: firstFile.path, andPath: secondFile.path) else {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func directorySnapshot(at root: URL) throws -> [String] {
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var paths: [String] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+            var relativePath = String(url.path.dropFirst(root.path.count))
+            if relativePath.hasPrefix("/") {
+                relativePath.removeFirst()
+            }
+            if values.isDirectory == true {
+                relativePath += "/"
+            }
+            paths.append(relativePath)
+        }
+        return paths.sorted()
+    }
+
+    private func archiveExistingItem(at url: URL, reason: String) throws {
+        guard fileManager.fileExists(atPath: url.path) else { return }
+
+        let archiveRoot = archivesDirectory.appendingPathComponent(reason, isDirectory: true)
+        try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+
+        let baseName = url.lastPathComponent.isEmpty ? "item" : url.lastPathComponent
+        var destination = archiveRoot.appendingPathComponent("\(formatter.string(from: Date()))-\(baseName)", isDirectory: false)
+        var attempt = 2
+        while fileManager.fileExists(atPath: destination.path) {
+            destination = archiveRoot.appendingPathComponent("\(formatter.string(from: Date()))-\(attempt)-\(baseName)", isDirectory: false)
+            attempt += 1
+        }
+
+        try fileManager.moveItem(at: url, to: destination)
     }
 
     private func ensurePersistentMemoryFile() throws {
@@ -276,6 +389,68 @@ final class CodexHomeManager {
         """
 
         try initialMemory.write(to: persistentMemoryFile, atomically: true, encoding: .utf8)
+    }
+
+    private func writeRuntimeMap(
+        home: URL,
+        configFile: URL,
+        soulFile: URL,
+        modelInstructionsFile: URL,
+        bundledSkillsDirectory: URL,
+        learnedSkillsDirectory: URL,
+        bundledWikiSeedDirectory: URL
+    ) throws {
+        let sessionsDirectory = home.appendingPathComponent("sessions", isDirectory: true)
+        let logs = OpenClickyMessageLogStore.shared
+        let runtimeMap = """
+        # OpenClicky Runtime Map
+
+        This file tells OpenClicky Agent Mode where durable context, logs, skills, and app state live. Agents may read or edit these files when the user asks, subject to normal safety rules for destructive changes, credentials, and permissions.
+
+        ## Agent Mode Home
+
+        - Codex home: \(home.path)
+        - Config: \(configFile.path)
+        - Soul/persona: \(soulFile.path)
+        - Model instructions: \(modelInstructionsFile.path)
+        - Runtime map: \(runtimeMapFile.path)
+        - Sessions: \(sessionsDirectory.path)
+        - Archives: \(archivesDirectory.path)
+
+        ## Memory And Skills
+
+        - Persistent memory: \(persistentMemoryFile.path)
+        - Memory articles: \(memoriesDirectory.path)
+        - Bundled skills: \(bundledSkillsDirectory.path)
+        - Learned workflow skills: \(learnedSkillsDirectory.path)
+        - Bundled wiki seed: \(bundledWikiSeedDirectory.path)
+        - Archives for replaced or optimized artifacts: \(archivesDirectory.path)
+
+        ## Logs And Review Notes
+
+        - Logs directory: \(logs.logDirectory.path)
+        - Current message log: \(logs.currentLogFile.path)
+        - Log review JSONL: \(logs.reviewCommentsFile.path)
+        - Agent review comments: \(logs.agentReviewCommentsFile.path)
+
+        ## Widgets
+
+        - Widget snapshot: \(OpenClickyWidgetStateStore.snapshotURL.path)
+        - App group identifier: \(AppBundleConfiguration.appGroupIdentifier)
+
+        ## Operating Rules
+
+        - Read `memory.md` before work and update it with stable user preferences, project facts, task outcomes, and useful workflow context.
+        - Read `SOUL.md` before agent work. Treat it as OpenClicky's persona and operating identity.
+        - Check learned skills before repeat workflows, then create or update a learned skill after a workflow becomes repeatable.
+        - When optimizing skills, prompts, memory files, logs-derived notes, or other OpenClicky artifacts, archive the previous version under \(archivesDirectory.path) before replacing it. Do not delete old versions.
+        - When learning from logs, create the needed memory entries, review notes, or learned skills, then archive superseded notes or skills instead of deleting them.
+        - Read log review comments when the user asks to review, tune, or fix behavior from logs.
+        - Read the widget snapshot when the user asks about widgets, active tasks, stats, or desktop status.
+        - Do not claim OpenClicky cannot remember or cannot inspect its own logs, memory, skills, or runtime files. Use the paths above.
+        """
+
+        try runtimeMap.write(to: runtimeMapFile, atomically: true, encoding: .utf8)
     }
 
     private func uniqueMemoryFileURL(baseFilename: String) -> URL {

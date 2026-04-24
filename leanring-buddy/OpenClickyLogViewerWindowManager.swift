@@ -503,6 +503,7 @@ struct OpenClickyLogViewerView: View {
             rawEntry: entry.rawJSON,
             comment: commentText
         )
+        OpenClickyWidgetStateStore().refreshLogReviewAttentionSnapshot()
         commentText = ""
         loadReviewComments()
         statusMessage = "Saved comment for \(entry.event)"

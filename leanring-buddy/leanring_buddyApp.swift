@@ -45,6 +45,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
+        companionManager.publishWidgetSnapshot()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         // OpenClicky development builds should also open visibly on launch even
@@ -61,6 +62,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach { companionManager.handleWidgetDeepLink($0) }
     }
 
     /// Registers the app as a login item so it launches automatically on
