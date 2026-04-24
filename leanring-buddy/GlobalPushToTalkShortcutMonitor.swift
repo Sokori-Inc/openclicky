@@ -28,7 +28,13 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     @Published private(set) var isShortcutCurrentlyPressed = false
 
     deinit {
-        stop()
+        if let globalEventTapRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
+        }
+
+        if let globalEventTap {
+            CFMachPortInvalidate(globalEventTap)
+        }
     }
 
     func start() {

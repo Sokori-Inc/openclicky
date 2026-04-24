@@ -2,17 +2,46 @@
 //  ClaudeAgentSDKAPI.swift
 //  OpenClicky
 //
-//  Local Claude Agent SDK bridge. This runs the user's installed Claude runtime
-//  and lets Claude Code/Agent SDK own authentication instead of reading tokens.
+//  Local Claude Agent SDK bridge. This keeps one Claude Agent SDK query session
+//  warm and streams each voice turn through that session instead of spawning a
+//  fresh Claude process for every response.
 //
 
 import Foundation
 
+@MainActor
 final class ClaudeAgentSDKAPI {
+    private typealias ResponseContinuation = CheckedContinuation<(text: String, duration: TimeInterval), Error>
+
+    private struct PendingRequest {
+        let id: String
+        let startedAt: Date
+        let onTextChunk: @MainActor @Sendable (String) -> Void
+        let continuation: ResponseContinuation
+        var accumulatedText: String
+        var didReceiveFirstDelta: Bool
+    }
+
     private let executableURL: URL
+    private let nodeExecutableURL: URL?
+    private let bridgeScriptURL: URL?
     private let fileManager: FileManager
     private let workingDirectory: URL
     var model: String
+
+    private static let persistentBridgeSystemPrompt = """
+    You are OpenClicky's persistent local Claude Agent SDK voice response session.
+    Keep the session warm and follow the current OpenClicky voice policy and context supplied with each user turn.
+    """
+
+    private var bridgeProcess: Process?
+    private var bridgeInput: FileHandle?
+    private var stdoutBuffer = ""
+    private var stderrBuffer = ""
+    private var pendingRequests: [String: PendingRequest] = [:]
+    private var warmupRequestID: String?
+    private var activeBridgeModel: String?
+    private var activeBridgeSystemPromptHash: Int?
 
     init?(
         model: String = OpenClickyModelCatalog.defaultVoiceResponseModelID,
@@ -24,9 +53,15 @@ final class ClaudeAgentSDKAPI {
         }
 
         self.executableURL = executableURL
+        self.nodeExecutableURL = Self.findNodeExecutable(fileManager: fileManager)
+        self.bridgeScriptURL = Self.findBridgeScript(fileManager: fileManager)
         self.fileManager = fileManager
         self.workingDirectory = workingDirectory ?? fileManager.homeDirectoryForCurrentUser
         self.model = model
+    }
+
+    deinit {
+        bridgeProcess?.terminate()
     }
 
     static func findExecutable(fileManager: FileManager = .default) -> URL? {
@@ -51,44 +86,510 @@ final class ClaudeAgentSDKAPI {
         }
     }
 
+    static func findNodeExecutable(fileManager: FileManager = .default) -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        if let explicitPath = environment["OPENCLICKY_NODE_EXECUTABLE"],
+           let executable = executableURL(atPath: explicitPath, fileManager: fileManager) {
+            return executable
+        }
+
+        var candidates = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("node", isDirectory: false) }
+
+        let home = fileManager.homeDirectoryForCurrentUser
+        candidates.append(contentsOf: [
+            URL(fileURLWithPath: "/opt/homebrew/bin/node", isDirectory: false),
+            URL(fileURLWithPath: "/usr/local/bin/node", isDirectory: false),
+            URL(fileURLWithPath: "/usr/bin/node", isDirectory: false)
+        ])
+
+        let nvmRoot = home
+            .appendingPathComponent(".nvm", isDirectory: true)
+            .appendingPathComponent("versions/node", isDirectory: true)
+        if let versions = try? fileManager.contentsOfDirectory(
+            at: nvmRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            candidates.append(contentsOf: versions
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
+                .map { $0.appendingPathComponent("bin/node", isDirectory: false) })
+        }
+
+        return candidates.first { candidate in
+            fileManager.isExecutableFile(atPath: candidate.path)
+        }
+    }
+
+    func warmUp(systemPrompt: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.sendRequest(
+                    kind: "warmup",
+                    images: [],
+                    systemPrompt: systemPrompt,
+                    conversationHistory: [],
+                    userPrompt: "get ready. prime the OpenClicky voice response session and reply with ready only.",
+                    onTextChunk: { _ in }
+                )
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "voice",
+                    direction: "error",
+                    event: "claude_agent_sdk.warmup.failed",
+                    fields: [
+                        "executor": "voice_response",
+                        "executionMethod": "ClaudeAgentSDKAPI.query",
+                        "transport": "agent_sdk_query",
+                        "streamingMethod": "claude_agent_sdk_query",
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+    }
+
     func analyzeImageStreaming(
         images: [(data: Data, label: String)],
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
-        let startedAt = Date()
-        let temporaryDirectory = try makeTemporaryDirectory()
-        defer {
-            try? fileManager.removeItem(at: temporaryDirectory)
+        try await sendRequest(
+            kind: "request",
+            images: images,
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt,
+            onTextChunk: onTextChunk
+        )
+    }
+
+    func stop() {
+        bridgeProcess?.terminationHandler = nil
+        bridgeProcess?.terminate()
+        try? bridgeInput?.close()
+        bridgeInput = nil
+        bridgeProcess = nil
+        activeBridgeModel = nil
+        activeBridgeSystemPromptHash = nil
+        failPendingRequests(
+            NSError(
+                domain: "ClaudeAgentSDKAPI",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK bridge stopped."]
+            )
+        )
+    }
+
+    private func sendRequest(
+        kind: String,
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> (text: String, duration: TimeInterval) {
+        try ensureBridge()
+
+        let requestID = UUID().uuidString
+        let attachments = images.map { image -> [String: Any] in
+            [
+                "label": image.label,
+                "mediaType": image.data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg",
+                "data": image.data.base64EncodedString()
+            ]
+        }
+        let history = conversationHistory.map { entry -> [String: Any] in
+            [
+                "user": entry.userPlaceholder,
+                "assistant": entry.assistantResponse
+            ]
+        }
+        let payload: [String: Any] = [
+            "type": kind,
+            "id": requestID,
+            "systemPrompt": systemPrompt,
+            "prompt": userPrompt,
+            "conversationHistory": history,
+            "images": attachments
+        ]
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "outgoing",
+            event: kind == "warmup" ? "claude_agent_sdk.warmup.request" : "claude_agent_sdk.query.request",
+            fields: [
+                "executor": "voice_response",
+                "executionMethod": "ClaudeAgentSDKAPI.query",
+                "transport": "agent_sdk_query",
+                "streamingMethod": "claude_agent_sdk_query",
+                "model": model,
+                "requestID": requestID,
+                "imageCount": images.count,
+                "promptLength": userPrompt.count
+            ]
+        )
+
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingRequests[requestID] = PendingRequest(
+                id: requestID,
+                startedAt: Date(),
+                onTextChunk: onTextChunk,
+                continuation: continuation,
+                accumulatedText: "",
+                didReceiveFirstDelta: false
+            )
+            if kind == "warmup" {
+                warmupRequestID = requestID
+            }
+            do {
+                try writeBridgeCommand(payload)
+            } catch {
+                pendingRequests.removeValue(forKey: requestID)
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func ensureBridge() throws {
+        let promptHash = Self.persistentBridgeSystemPrompt.hashValue
+        if let bridgeProcess,
+           bridgeProcess.isRunning,
+           activeBridgeModel == model,
+           activeBridgeSystemPromptHash == promptHash,
+           bridgeInput != nil {
+            return
         }
 
-        let attachments = try writeImageAttachments(images, to: temporaryDirectory)
-        let prompt = Self.composePrompt(
-            userPrompt: userPrompt,
-            conversationHistory: conversationHistory,
-            attachments: attachments
-        )
+        stop()
 
-        let output = try await runClaudeAgent(
-            prompt: prompt,
-            systemPrompt: systemPrompt,
-            attachmentDirectory: temporaryDirectory
-        )
-        let text = Self.extractText(from: output.stdout)
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let nodeExecutableURL else {
             throw NSError(
                 domain: "ClaudeAgentSDKAPI",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK returned an empty response."]
+                code: -20,
+                userInfo: [NSLocalizedDescriptionKey: "Node.js is required for the Claude Agent SDK bridge but was not found."]
             )
         }
 
-        await MainActor.run {
-            onTextChunk(text)
+        guard let bridgeScriptURL else {
+            throw NSError(
+                domain: "ClaudeAgentSDKAPI",
+                code: -21,
+                userInfo: [NSLocalizedDescriptionKey: "OpenClicky could not find ClaudeAgentSDKBridge/bridge.mjs."]
+            )
         }
-        return (text: text, duration: Date().timeIntervalSince(startedAt))
+
+        let process = Process()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+
+        process.executableURL = nodeExecutableURL
+        process.arguments = [bridgeScriptURL.path]
+        process.currentDirectoryURL = workingDirectory
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        process.environment = bridgeEnvironment(
+            nodeExecutableURL: nodeExecutableURL,
+            bridgeScriptURL: bridgeScriptURL,
+            systemPrompt: Self.persistentBridgeSystemPrompt
+        )
+
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor [weak self] in
+                self?.consumeStdout(text)
+            }
+        }
+
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor [weak self] in
+                self?.consumeStderr(text)
+            }
+        }
+
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor [weak self] in
+                self?.handleBridgeTermination(status: process.terminationStatus)
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            throw error
+        }
+
+        bridgeProcess = process
+        bridgeInput = inputPipe.fileHandleForWriting
+        activeBridgeModel = model
+        activeBridgeSystemPromptHash = promptHash
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "outgoing",
+            event: "claude_agent_sdk.bridge.started",
+            fields: [
+                "executor": "voice_response",
+                "executionMethod": "ClaudeAgentSDKAPI.query",
+                "transport": "agent_sdk_query",
+                "streamingMethod": "claude_agent_sdk_query",
+                "model": model,
+                "node": nodeExecutableURL.path,
+                "bridge": bridgeScriptURL.path,
+                "claudeExecutable": executableURL.path
+            ]
+        )
+    }
+
+    private func bridgeEnvironment(
+        nodeExecutableURL: URL,
+        bridgeScriptURL: URL,
+        systemPrompt: String
+    ) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let nodeDirectory = nodeExecutableURL.deletingLastPathComponent().path
+        let existingPath = environment["PATH"] ?? ""
+        let baselinePath = "/Users/jkneen/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["PATH"] = [nodeDirectory, existingPath, baselinePath]
+            .filter { !$0.isEmpty }
+            .joined(separator: ":")
+        environment["OPENCLICKY_CLAUDE_EXECUTABLE"] = executableURL.path
+        environment["OPENCLICKY_CLAUDE_MODEL"] = model
+        environment["OPENCLICKY_CLAUDE_CWD"] = workingDirectory.path
+        environment["OPENCLICKY_CLAUDE_SYSTEM_PROMPT"] = systemPrompt
+        environment["OPENCLICKY_CLAUDE_AGENT_SDK_PATHS"] = Self.nodeModuleSearchPaths(
+            bridgeScriptURL: bridgeScriptURL,
+            fileManager: fileManager
+        ).joined(separator: ":")
+        environment["CLAUDE_AGENT_SDK_CLIENT_APP"] = "openclicky/1.0"
+        return environment
+    }
+
+    private static func nodeModuleSearchPaths(bridgeScriptURL: URL, fileManager: FileManager) -> [String] {
+        let home = fileManager.homeDirectoryForCurrentUser
+        var paths = [
+            bridgeScriptURL.deletingLastPathComponent().path,
+            home.appendingPathComponent(".nvm/versions/node", isDirectory: true).path,
+            "/opt/homebrew/lib/node_modules",
+            "/usr/local/lib/node_modules"
+        ]
+
+        let nvmRoot = home.appendingPathComponent(".nvm/versions/node", isDirectory: true)
+        if let versions = try? fileManager.contentsOfDirectory(
+            at: nvmRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            paths.append(contentsOf: versions.map {
+                $0.appendingPathComponent("lib/node_modules", isDirectory: true).path
+            })
+        }
+
+        return Array(Set(paths)).sorted()
+    }
+
+    private func writeBridgeCommand(_ command: [String: Any]) throws {
+        guard let bridgeInput else {
+            throw NSError(
+                domain: "ClaudeAgentSDKAPI",
+                code: -22,
+                userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK bridge input is not available."]
+            )
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: command)
+        bridgeInput.write(data)
+        bridgeInput.write(Data("\n".utf8))
+    }
+
+    private func consumeStdout(_ text: String) {
+        stdoutBuffer += text
+        let lines = stdoutBuffer.components(separatedBy: "\n")
+        stdoutBuffer = lines.last ?? ""
+        for line in lines.dropLast() {
+            handleBridgeLine(line)
+        }
+    }
+
+    private func consumeStderr(_ text: String) {
+        stderrBuffer += text
+        let lines = stderrBuffer.components(separatedBy: "\n")
+        stderrBuffer = lines.last ?? ""
+        for line in lines.dropLast() where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "incoming",
+                event: "claude_agent_sdk.bridge.stderr",
+                fields: [
+                    "executor": "voice_response",
+                    "executionMethod": "ClaudeAgentSDKAPI.query",
+                    "message": Self.truncated(line, maxLength: 1_000)
+                ]
+            )
+        }
+    }
+
+    private func handleBridgeLine(_ line: String) {
+        guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = line.data(using: .utf8),
+              let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = event["type"] as? String else {
+            return
+        }
+
+        let requestID = event["id"] as? String
+        switch type {
+        case "ready":
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "incoming",
+                event: "claude_agent_sdk.bridge.ready",
+                fields: [
+                    "executor": "voice_response",
+                    "executionMethod": "ClaudeAgentSDKAPI.query",
+                    "transport": "agent_sdk_query",
+                    "streamingMethod": "claude_agent_sdk_query",
+                    "sdkPath": event["sdkPath"] as? String ?? "unknown"
+                ]
+            )
+
+        case "started":
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "incoming",
+                event: "claude_agent_sdk.query.started",
+                fields: [
+                    "executor": "voice_response",
+                    "executionMethod": "ClaudeAgentSDKAPI.query",
+                    "transport": "agent_sdk_query",
+                    "streamingMethod": "claude_agent_sdk_query",
+                    "requestID": requestID ?? "none"
+                ]
+            )
+
+        case "delta":
+            guard let requestID,
+                  var pending = pendingRequests[requestID],
+                  let text = event["text"] as? String else { return }
+            pending.accumulatedText = text
+            if !pending.didReceiveFirstDelta {
+                pending.didReceiveFirstDelta = true
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "voice",
+                    direction: "incoming",
+                    event: "claude_agent_sdk.query.first_text_delta",
+                    fields: [
+                        "executor": "voice_response",
+                        "executionMethod": "ClaudeAgentSDKAPI.query",
+                        "transport": "agent_sdk_query",
+                        "streamingMethod": "claude_agent_sdk_query",
+                        "requestID": requestID,
+                        "firstTokenLatencyMs": Self.elapsedMilliseconds(from: pending.startedAt, to: Date())
+                    ]
+                )
+            }
+            pendingRequests[requestID] = pending
+            pending.onTextChunk(text)
+
+        case "result":
+            guard let requestID,
+                  let pending = pendingRequests.removeValue(forKey: requestID) else { return }
+            let text = (event["text"] as? String) ?? pending.accumulatedText
+            let duration = Date().timeIntervalSince(pending.startedAt)
+            let logEvent = requestID == warmupRequestID ? "claude_agent_sdk.warmup.ready" : "claude_agent_sdk.query.response"
+            if requestID == warmupRequestID {
+                warmupRequestID = nil
+            }
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "incoming",
+                event: logEvent,
+                fields: [
+                    "executor": "voice_response",
+                    "executionMethod": "ClaudeAgentSDKAPI.query",
+                    "transport": "agent_sdk_query",
+                    "streamingMethod": "claude_agent_sdk_query",
+                    "requestID": requestID,
+                    "responseLength": text.count,
+                    "durationMs": Int((duration * 1000).rounded())
+                ]
+            )
+            pending.continuation.resume(returning: (text: text, duration: duration))
+
+        case "error":
+            let message = (event["message"] as? String) ?? "Claude Agent SDK bridge error."
+            let error = NSError(
+                domain: "ClaudeAgentSDKAPI",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+            if let requestID,
+               let pending = pendingRequests.removeValue(forKey: requestID) {
+                pending.continuation.resume(throwing: error)
+            } else {
+                failPendingRequests(error)
+            }
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "error",
+                event: "claude_agent_sdk.query.error",
+                fields: [
+                    "executor": "voice_response",
+                    "executionMethod": "ClaudeAgentSDKAPI.query",
+                    "transport": "agent_sdk_query",
+                    "streamingMethod": "claude_agent_sdk_query",
+                    "requestID": requestID ?? "none",
+                    "error": message
+                ]
+            )
+
+        default:
+            break
+        }
+    }
+
+    private func handleBridgeTermination(status: Int32) {
+        bridgeProcess = nil
+        bridgeInput = nil
+        activeBridgeModel = nil
+        activeBridgeSystemPromptHash = nil
+
+        let error = NSError(
+            domain: "ClaudeAgentSDKAPI",
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK bridge exited with status \(status)."]
+        )
+        failPendingRequests(error)
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: status == 0 ? "incoming" : "error",
+            event: "claude_agent_sdk.bridge.exited",
+            fields: [
+                "executor": "voice_response",
+                "executionMethod": "ClaudeAgentSDKAPI.query",
+                "status": status
+            ]
+        )
+    }
+
+    private func failPendingRequests(_ error: Error) {
+        let requests = pendingRequests.values
+        pendingRequests.removeAll()
+        warmupRequestID = nil
+        for request in requests {
+            request.continuation.resume(throwing: error)
+        }
     }
 
     private static func executableURL(atPath path: String, fileManager: FileManager) -> URL? {
@@ -97,165 +598,31 @@ final class ClaudeAgentSDKAPI {
         return URL(fileURLWithPath: expandedPath, isDirectory: false)
     }
 
-    private func makeTemporaryDirectory() throws -> URL {
-        let directory = fileManager.temporaryDirectory
-            .appendingPathComponent("OpenClickyClaudeAgent", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+    private static func findBridgeScript(fileManager: FileManager = .default) -> URL? {
+        if let bundled = Bundle.main.url(forResource: "ClaudeAgentSDKBridge", withExtension: nil)?
+            .appendingPathComponent("bridge.mjs", isDirectory: false),
+           fileManager.fileExists(atPath: bundled.path) {
+            return bundled
+        }
+
+        if let sourceResources = CodexRuntimeLocator.sourceAppResourcesDirectory(fileManager: fileManager) {
+            let candidate = sourceResources
+                .appendingPathComponent("ClaudeAgentSDKBridge", isDirectory: true)
+                .appendingPathComponent("bridge.mjs", isDirectory: false)
+            if fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return nil
     }
 
-    private func writeImageAttachments(
-        _ images: [(data: Data, label: String)],
-        to directory: URL
-    ) throws -> [(label: String, fileURL: URL)] {
-        try images.enumerated().map { index, image in
-            let fileExtension = image.data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "png" : "jpg"
-            let fileURL = directory.appendingPathComponent("screen-\(index + 1).\(fileExtension)", isDirectory: false)
-            try image.data.write(to: fileURL, options: [.atomic])
-            return (label: image.label, fileURL: fileURL)
-        }
+    private static func elapsedMilliseconds(from start: Date, to end: Date) -> Int {
+        max(0, Int((end.timeIntervalSince(start) * 1000).rounded()))
     }
 
-    private static func composePrompt(
-        userPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
-        attachments: [(label: String, fileURL: URL)]
-    ) -> String {
-        var sections: [String] = []
-
-        if !conversationHistory.isEmpty {
-            var lines = ["Recent conversation:"]
-            for entry in conversationHistory {
-                lines.append("User: \(entry.userPlaceholder)")
-                lines.append("OpenClicky: \(entry.assistantResponse)")
-            }
-            sections.append(lines.joined(separator: "\n"))
-        }
-
-        if !attachments.isEmpty {
-            var lines = [
-                "Screen context:",
-                "Use the Read tool on these local image files when screen details matter. Return pointing tags in screenshot pixel coordinates when appropriate."
-            ]
-            for (index, attachment) in attachments.enumerated() {
-                lines.append("\(index + 1). \(attachment.label): \(attachment.fileURL.path)")
-            }
-            sections.append(lines.joined(separator: "\n"))
-        }
-
-        sections.append("User request:\n\(userPrompt)")
-        return sections.joined(separator: "\n\n")
-    }
-
-    private func runClaudeAgent(
-        prompt: String,
-        systemPrompt: String,
-        attachmentDirectory: URL
-    ) async throws -> (stdout: String, stderr: String) {
-        let arguments = [
-            "-p",
-            "--output-format", "stream-json",
-            "--permission-mode", "dontAsk",
-            "--model", model,
-            "--system-prompt", systemPrompt,
-            "--allowedTools", "Read",
-            "--add-dir", attachmentDirectory.path,
-            prompt
-        ]
-
-        return try await Self.runProcess(
-            executableURL: executableURL,
-            arguments: arguments,
-            workingDirectory: workingDirectory
-        )
-    }
-
-    private static func runProcess(
-        executableURL: URL,
-        arguments: [String],
-        workingDirectory: URL
-    ) async throws -> (stdout: String, stderr: String) {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-
-                process.executableURL = executableURL
-                process.arguments = arguments
-                process.currentDirectoryURL = workingDirectory
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                process.environment = ProcessInfo.processInfo.environment
-
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-
-                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stdout = String(data: outputData, encoding: .utf8) ?? ""
-                    let stderr = String(data: errorData, encoding: .utf8) ?? ""
-
-                    guard process.terminationStatus == 0 else {
-                        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr
-                        throw NSError(
-                            domain: "ClaudeAgentSDKAPI",
-                            code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: message]
-                        )
-                    }
-
-                    continuation.resume(returning: (stdout: stdout, stderr: stderr))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    private static func extractText(from stdout: String) -> String {
-        var assistantTextParts: [String] = []
-        var resultText: String?
-
-        for line in stdout.components(separatedBy: .newlines) {
-            guard let data = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
-            }
-
-            if let type = json["type"] as? String,
-               type == "result",
-               let text = json["result"] as? String,
-               !text.isEmpty {
-                resultText = text
-            }
-
-            guard let message = json["message"] as? [String: Any],
-                  let content = message["content"] as? [[String: Any]] else {
-                continue
-            }
-
-            for block in content {
-                if let type = block["type"] as? String,
-                   type == "text",
-                   let text = block["text"] as? String,
-                   !text.isEmpty {
-                    assistantTextParts.append(text)
-                }
-            }
-        }
-
-        if let resultText, !resultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return resultText
-        }
-
-        let assistantText = assistantTextParts.joined()
-        if !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return assistantText
-        }
-
-        return stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func truncated(_ value: String, maxLength: Int) -> String {
+        guard value.count > maxLength else { return value }
+        return String(value.prefix(maxLength))
     }
 }

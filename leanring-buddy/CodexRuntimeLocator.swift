@@ -1,7 +1,7 @@
 import Foundation
 
-enum CodexRuntimeLocator {
-    enum LocatorError: LocalizedError {
+nonisolated enum CodexRuntimeLocator {
+    nonisolated enum LocatorError: LocalizedError {
         case codexExecutableNotFound
 
         var errorDescription: String? {

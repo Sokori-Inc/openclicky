@@ -54,7 +54,7 @@ class WindowPositionManager {
             return .alreadyGranted
         case .systemPrompt:
             hasAttemptedAccessibilitySystemPromptDuringCurrentLaunch = true
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         case .systemSettings:
             openAccessibilitySettings()

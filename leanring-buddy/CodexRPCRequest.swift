@@ -1,6 +1,6 @@
 import Foundation
 
-struct CodexRPCRequest {
+nonisolated struct CodexRPCRequest {
     let id: Int?
     let method: String
     let params: Any?
@@ -31,13 +31,13 @@ struct CodexRPCRequest {
     }
 }
 
-struct CodexRPCError: LocalizedError {
+nonisolated struct CodexRPCError: LocalizedError {
     let message: String
 
     var errorDescription: String? { message }
 }
 
-enum CodexJSON {
+nonisolated enum CodexJSON {
     static func string(_ value: Any?) -> String? {
         if let string = value as? String { return string }
         if let number = value as? NSNumber { return number.stringValue }

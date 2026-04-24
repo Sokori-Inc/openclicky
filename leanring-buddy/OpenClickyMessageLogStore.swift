@@ -1,6 +1,6 @@
 import Foundation
 
-final class OpenClickyMessageLogStore: @unchecked Sendable {
+nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
     static let shared = OpenClickyMessageLogStore()
 
     private let fileManager: FileManager

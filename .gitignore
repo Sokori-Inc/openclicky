@@ -9,6 +9,7 @@ DerivedData/
 /.xcode-derived-signed-dev
 /recovered
 /ShippedResources
+/AppResources/OpenClicky/ClaudeAgentSDKBridge/node_modules/
 
 worker/.dev.vars
 worker/.env

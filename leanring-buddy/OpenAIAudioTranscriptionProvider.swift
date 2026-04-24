@@ -282,7 +282,8 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
     }
 
     deinit {
-        cancel()
+        transcriptionUploadTask?.cancel()
+        urlSession.invalidateAndCancel()
     }
 }
 

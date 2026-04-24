@@ -6,8 +6,8 @@ import WidgetKit
 
 @MainActor
 final class OpenClickyWidgetStateStore {
-    static let snapshotFileName = "widget-snapshot.json"
-    static let fallbackContainerName = "WidgetState"
+    nonisolated static let snapshotFileName = "widget-snapshot.json"
+    nonisolated static let fallbackContainerName = "WidgetState"
 
     private let fileManager: FileManager
     private var pendingWriteTask: Task<Void, Never>?
@@ -16,12 +16,12 @@ final class OpenClickyWidgetStateStore {
         self.fileManager = fileManager
     }
 
-    static var snapshotURL: URL {
+    nonisolated static var snapshotURL: URL {
         containerDirectory()
             .appendingPathComponent(snapshotFileName, isDirectory: false)
     }
 
-    static func containerDirectory(fileManager: FileManager = .default) -> URL {
+    nonisolated static func containerDirectory(fileManager: FileManager = .default) -> URL {
         if let appGroupURL = fileManager.containerURL(forSecurityApplicationGroupIdentifier: AppBundleConfiguration.appGroupIdentifier) {
             return appGroupURL
         }
@@ -117,7 +117,7 @@ final class OpenClickyWidgetStateStore {
         )
     }
 
-    static func readSnapshot(fileManager: FileManager = .default) -> OpenClickyWidgetSnapshot {
+    nonisolated static func readSnapshot(fileManager: FileManager = .default) -> OpenClickyWidgetSnapshot {
         let fileURL = containerDirectory(fileManager: fileManager)
             .appendingPathComponent(snapshotFileName, isDirectory: false)
         guard let data = try? Data(contentsOf: fileURL) else {

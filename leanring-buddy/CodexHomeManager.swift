@@ -277,7 +277,6 @@ final class CodexHomeManager {
 
     private func copyDefaultCodexAuthIfAvailable(to home: URL) throws {
         guard ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL) else { return }
-        guard AppBundleConfiguration.openAIAPIKey() == nil else { return }
 
         let destination = home.appendingPathComponent("auth.json", isDirectory: false)
         guard !fileManager.fileExists(atPath: destination.path) else { return }

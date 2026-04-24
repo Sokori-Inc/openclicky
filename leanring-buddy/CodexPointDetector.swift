@@ -10,6 +10,8 @@ import CoreGraphics
 import Foundation
 
 final class CodexPointDetector {
+    private static let codexRuntimeCompatibilityFallbackModel = "gpt-5.4-mini"
+
     private let model: String
     private let fileManager: FileManager
     private let homeManager: CodexHomeManager
@@ -164,15 +166,59 @@ final class CodexPointDetector {
             prompt
         ])
 
-        let stdout = try await Self.runProcess(
-            executableURL: executable,
-            arguments: arguments,
-            codexHome: homeManager.codexHomeDirectory,
-            runtimeExecutableURL: executable
-        )
+        let stdout: String
+        do {
+            stdout = try await Self.runProcess(
+                executableURL: executable,
+                arguments: arguments,
+                codexHome: homeManager.codexHomeDirectory,
+                runtimeExecutableURL: executable
+            )
+        } catch {
+            guard Self.shouldRetryWithCompatibilityFallback(error),
+                  model != Self.codexRuntimeCompatibilityFallbackModel else {
+                throw error
+            }
+
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "error",
+                event: "codex_point_detector.model_fallback",
+                fields: [
+                    "requestedModel": model,
+                    "fallbackModel": Self.codexRuntimeCompatibilityFallbackModel,
+                    "error": error.localizedDescription
+                ]
+            )
+            arguments = argumentsWithModel(Self.codexRuntimeCompatibilityFallbackModel, from: arguments)
+            stdout = try await Self.runProcess(
+                executableURL: executable,
+                arguments: arguments,
+                codexHome: homeManager.codexHomeDirectory,
+                runtimeExecutableURL: executable
+            )
+        }
         let lastMessage = (try? String(contentsOf: outputURL, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return lastMessage?.isEmpty == false ? lastMessage! : stdout
+    }
+
+    private static func shouldRetryWithCompatibilityFallback(_ error: Error) -> Bool {
+        let message = error.localizedDescription
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        return message.contains("requires a newer version of codex")
+            || message.contains("please upgrade to the latest app or cli")
+    }
+
+    private func argumentsWithModel(_ replacementModel: String, from arguments: [String]) -> [String] {
+        var updatedArguments = arguments
+        guard let modelFlagIndex = updatedArguments.firstIndex(of: "--model"),
+              updatedArguments.indices.contains(modelFlagIndex + 1) else {
+            return updatedArguments
+        }
+        updatedArguments[modelFlagIndex + 1] = replacementModel
+        return updatedArguments
     }
 
     private func makeTemporaryDirectory() throws -> URL {

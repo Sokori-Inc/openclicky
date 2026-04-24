@@ -251,6 +251,10 @@ final class CompanionManager: ObservableObject {
         return ClaudeAgentSDKAPI(model: selectedModel)
     }()
 
+    private lazy var codexVoiceSession: CodexVoiceSession = {
+        return CodexVoiceSession(model: selectedModel, homeManager: codexHomeManager)
+    }()
+
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(
             apiKey: Self.elevenLabsAPIKey,
@@ -356,12 +360,19 @@ final class CompanionManager: ObservableObject {
     private var isTutorObservationInFlight = false
 
     func setSelectedModel(_ model: String) {
-        let resolvedModel = OpenClickyModelCatalog.voiceResponseModel(withID: model).id
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: model)
+        let resolvedModel = selectedVoiceResponseModel.id
         selectedModel = resolvedModel
         UserDefaults.standard.set(resolvedModel, forKey: "selectedVoiceResponseModel")
-        claudeAPI.model = resolvedModel
-        claudeAgentSDKAPI?.model = resolvedModel
-        openAIAPI.model = resolvedModel
+        switch selectedVoiceResponseModel.provider {
+        case .anthropic:
+            claudeAPI.model = resolvedModel
+            claudeAgentSDKAPI?.model = resolvedModel
+        case .openAI, .codex:
+            openAIAPI.model = resolvedModel
+            codexVoiceSession.model = resolvedModel
+            codexVoiceSession.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
+        }
     }
 
     func setSelectedComputerUseModel(_ model: String) {
@@ -615,11 +626,15 @@ final class CompanionManager: ObservableObject {
         if isTutorModeEnabled {
             startTutorIdleObservation()
         }
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // before the first voice interaction.
-        _ = claudeAPI
-        if AppBundleConfiguration.anthropicAPIKey() == nil {
-            print("CompanionManager: Anthropic is not configured. Set AnthropicAPIKey in Info.plist or ANTHROPIC_API_KEY in the launch environment.")
+        if let claudeAgentSDKAPI {
+            claudeAgentSDKAPI.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
+        } else if AppBundleConfiguration.anthropicAPIKey() != nil {
+            _ = claudeAPI
+        }
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        if selectedVoiceResponseModel.provider == .openAI || selectedVoiceResponseModel.provider == .codex {
+            codexVoiceSession.model = selectedVoiceResponseModel.id
+            codexVoiceSession.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
         }
 
         // If the user already completed onboarding AND all permissions are
@@ -733,6 +748,8 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        claudeAgentSDKAPI?.stop()
+        codexVoiceSession.stop()
         pendingAgentActivityRefreshTasks.values.forEach { $0.cancel() }
         pendingAgentActivityRefreshTasks.removeAll()
         shortcutTransitionCancellable?.cancel()
@@ -1190,34 +1207,35 @@ final class CompanionManager: ObservableObject {
 
         switch selectedVoiceResponseModel.provider {
         case .anthropic:
-            if AppBundleConfiguration.anthropicAPIKey() != nil {
+            if claudeAgentSDKAPI != nil {
+                fields["executionMethod"] = "ClaudeAgentSDKAPI.analyzeImageStreaming"
+                fields["authMode"] = "local_claude_agent_sdk_primary"
+                fields["transport"] = "agent_sdk_query"
+                fields["streamingMethod"] = "claude_agent_sdk_query"
+                fields["apiKeyFallback"] = AppBundleConfiguration.anthropicAPIKey() != nil
+            } else if AppBundleConfiguration.anthropicAPIKey() != nil {
                 fields["executionMethod"] = "ClaudeAPI.analyzeImageStreaming"
-                fields["authMode"] = "anthropic_api_key"
+                fields["authMode"] = "anthropic_api_key_fallback"
                 fields["transport"] = "sse"
                 fields["streamingMethod"] = "URLSession.bytes"
             } else {
                 fields["executionMethod"] = "ClaudeAgentSDKAPI.analyzeImageStreaming"
-                fields["authMode"] = "local_claude_agent_sdk"
-                fields["transport"] = "process_stream_json"
-                fields["streamingMethod"] = "claude_cli_stream_json_buffered"
+                fields["authMode"] = "local_claude_agent_sdk_missing"
+                fields["transport"] = "agent_sdk_query"
+                fields["streamingMethod"] = "claude_agent_sdk_query"
             }
         case .openAI:
-            if AppBundleConfiguration.openAIAPIKey() != nil {
-                fields["executionMethod"] = "OpenAIAPI.analyzeImageStreaming"
-                fields["authMode"] = "openai_api_key"
-                fields["transport"] = "sse"
-                fields["streamingMethod"] = "URLSession.bytes"
-            } else {
-                fields["executionMethod"] = "CodexPointDetector.analyzeImageResponse"
-                fields["authMode"] = "local_codex"
-                fields["transport"] = "process"
-                fields["streamingMethod"] = "codex_exec_buffered"
-            }
+            fields["executionMethod"] = "CodexVoiceSession.analyzeImageStreaming"
+            fields["authMode"] = "local_codex_chatgpt_primary"
+            fields["transport"] = "codex_app_server_stdio"
+            fields["streamingMethod"] = "codex_app_server_agentMessage_delta"
+            fields["apiKeyFallback"] = AppBundleConfiguration.openAIAPIKey() != nil
         case .codex:
-            fields["executionMethod"] = "CodexPointDetector.analyzeImageResponse"
-            fields["authMode"] = "local_codex"
-            fields["transport"] = "process"
-            fields["streamingMethod"] = "codex_exec_buffered"
+            fields["executionMethod"] = "CodexVoiceSession.analyzeImageStreaming"
+            fields["authMode"] = "local_codex_chatgpt_primary"
+            fields["transport"] = "codex_app_server_stdio"
+            fields["streamingMethod"] = "codex_app_server_agentMessage_delta"
+            fields["apiKeyFallback"] = AppBundleConfiguration.openAIAPIKey() != nil
         }
 
         return fields
@@ -2903,7 +2921,7 @@ final class CompanionManager: ObservableObject {
 
         let patterns = [
             #"(?i)^\s*(?:this\s+is\s+)?(?:a\s+)?(?:new|separate|different)\s+(?:agent\s+|codex\s+)?task\s*[:,-]?\s+(.+?)\s*$"#,
-            #"(?i)^\s*(?:start|create|kick\s+off|launch)\s+(?:a\s+)?(?:new|separate|different)\s+(?:agent|codex)\s+task\s*(?:to|for|that)?\s+(.+?)\s*$"#,
+            #"(?i)^\s*(?:start|create|spin\s+up|kick\s+off|launch)\s+(?:a\s+)?(?:new|separate|different)\s+(?:agent|codex)\s+task\s*(?:to|for|that)?\s+(.+?)\s*$"#,
             #"(?i)^\s*(?:new|separate|different)\s+(?:agent|codex)\s*(?:task|job|session)?\s*[:,-]?\s+(.+?)\s*$"#
         ]
 
@@ -2931,7 +2949,7 @@ final class CompanionManager: ObservableObject {
 
         let patterns = [
             #"(?i)^\s*(?:this\s+is\s+)?(?:a\s+)?(?:new|separate|different)\s+(?:agent\s+|codex\s+)?task[\s\.\!\?]*$"#,
-            #"(?i)^\s*(?:start|create|kick\s+off|launch)\s+(?:a\s+)?(?:new|separate|different)\s+(?:agent|codex)\s+task[\s\.\!\?]*$"#,
+            #"(?i)^\s*(?:start|create|spin\s+up|kick\s+off|launch)\s+(?:a\s+)?(?:new|separate|different)\s+(?:agent|codex)\s+task[\s\.\!\?]*$"#,
             #"(?i)^\s*(?:new|separate|different)\s+(?:agent|codex)\s*(?:task|job|session)?[\s\.\!\?]*$"#
         ]
 
@@ -3225,7 +3243,8 @@ final class CompanionManager: ObservableObject {
         guard !candidate.isEmpty else { return nil }
 
         let patterns = [
-            #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:create|start|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)\s*(?:task|job|session)?\s+(?:to|for|that|which|who)?\s*(.+?)\s*$"#,
+            #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:create|start|spin\s+up|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)\s*(?:task|job|session)?\s+(?:to|for|that|which|who)?\s*(.+?)\s*$"#,
+            #"(?i)^\s*(?:the\s+)?(?:agent|codex)\s+(?:create|start|spin\s+up|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)?\s*(?:task|job|session)?\s*(?:to|for|that|which|who)?\s*(.+?)\s*$"#,
             #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:ask|tell|have|get)\s+(?:an?\s+|the\s+)?(?:agent|codex)\s+to\s+(.+?)\s*$"#
         ]
 
@@ -3246,7 +3265,8 @@ final class CompanionManager: ObservableObject {
         guard !candidate.isEmpty else { return false }
 
         let patterns = [
-            #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:create|start|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)\s*(?:task|job|session)?[\s\.\!\?]*$"#,
+            #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:create|start|spin\s+up|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)\s*(?:task|job|session)?[\s\.\!\?]*$"#,
+            #"(?i)^\s*(?:the\s+)?(?:agent|codex)\s+(?:create|start|spin\s+up|spawn|run|launch|kick\s+off|set\s+up)\s+(?:an?\s+|the\s+)?(?:new\s+)?(?:background\s+)?(?:agent|codex)?\s*(?:task|job|session)?[\s\.\!\?]*$"#,
             #"(?i)^\s*(?:(?:clicky|openclicky)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:ask|tell|have|get)\s+(?:an?\s+|the\s+)?(?:agent|codex)(?:\s+to)?[\s\.\!\?]*$"#
         ]
 
@@ -3753,7 +3773,7 @@ final class CompanionManager: ObservableObject {
 
     private static func normalizedApplicationName(from rawTarget: String) -> String {
         var target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
-        target = target.trimmingCharacters(in: CharacterSet(charactersIn: ".,:;!?- "))
+        target = target.trimmingCharacters(in: CharacterSet(charactersIn: ".,:;!?-–— "))
         target = target.replacingOccurrences(
             of: #"(?i)^(?:my|the|a|an)\s+"#,
             with: "",
@@ -3879,7 +3899,9 @@ final class CompanionManager: ObservableObject {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let spokenNormalized = normalizedSpokenCommandText(value)
         return ["", "my", "the", "a", "an", "it", "that", "this"].contains(normalized)
+            || ["", "my", "the", "a", "an", "it", "that", "this"].contains(spokenNormalized)
     }
 
     private static func isReservedAgentOpenTarget(_ value: String) -> Bool {
@@ -4483,6 +4505,7 @@ final class CompanionManager: ObservableObject {
     private func interruptCurrentVoiceResponse() {
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        codexVoiceSession.cancelActiveTurn(reason: "voice_response_interrupted")
         elevenLabsTTSClient.stopPlayback()
         fallbackSpeechSynthesizer?.stopSpeaking(at: .immediate)
         fallbackSpeechSynthesizer = nil
@@ -4744,6 +4767,20 @@ final class CompanionManager: ObservableObject {
         """
     }
 
+    private func currentVoiceResponseSystemPrompt() -> String {
+        let memoryContext = codexHomeManager.persistentMemoryContext()
+        return """
+        \(Self.companionVoiceResponseSystemPrompt)
+
+        \(runtimeStorageContextForVoicePrompt())
+
+        persistent memory:
+        read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
+
+        \(memoryContext)
+        """
+    }
+
     private static let tutorModeSystemPrompt = """
     you're OpenClicky in tutor mode. the user wants to learn the app or workflow currently on screen, and you can see their focused window.
 
@@ -4848,17 +4885,7 @@ final class CompanionManager: ObservableObject {
                 } else {
                     userPromptForClaude = transcript
                 }
-                let memoryContext = codexHomeManager.persistentMemoryContext()
-                let voiceSystemPrompt = """
-                \(Self.companionVoiceResponseSystemPrompt)
-
-                \(runtimeStorageContextForVoicePrompt())
-
-                persistent memory:
-                read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
-
-                \(memoryContext)
-                """
+                let voiceSystemPrompt = currentVoiceResponseSystemPrompt()
 
                 let modelStartedAt = Date()
                 var modelResponseFields = self.voiceResponseExecutionFields()
@@ -5198,7 +5225,7 @@ final class CompanionManager: ObservableObject {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
         let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
 
@@ -5239,8 +5266,36 @@ final class CompanionManager: ObservableObject {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
+        if let claudeAgentSDKAPI {
+            do {
+                claudeAgentSDKAPI.model = model
+                let (text, _) = try await claudeAgentSDKAPI.analyzeImageStreaming(
+                    images: images,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    userPrompt: userPrompt,
+                    onTextChunk: onTextChunk
+                )
+                return text
+            } catch {
+                guard AppBundleConfiguration.anthropicAPIKey() != nil else {
+                    throw error
+                }
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "voice",
+                    direction: "error",
+                    event: "voice.response_fallback",
+                    fields: [
+                        "from": "claude_agent_sdk",
+                        "to": "anthropic_api_key",
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+
         if AppBundleConfiguration.anthropicAPIKey() != nil {
             claudeAPI.model = model
             let (text, _) = try await claudeAPI.analyzeImageStreaming(
@@ -5253,16 +5308,48 @@ final class CompanionManager: ObservableObject {
             return text
         }
 
-        guard let claudeAgentSDKAPI else {
-            throw NSError(
-                domain: "ClaudeAgentSDKAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Claude is not configured. Sign in to Claude Code locally or set an Anthropic API key."]
+        throw NSError(
+            domain: "ClaudeAgentSDKAPI",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Claude is not configured. Sign in to Claude Code locally or set an Anthropic API key."]
+        )
+    }
+
+    private func analyzeOpenAIOrCodexVoiceResponse(
+        images: [(data: Data, label: String)],
+        model: String,
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String {
+        do {
+            return try await analyzeCodexVoiceResponse(
+                images: images,
+                model: model,
+                systemPrompt: systemPrompt,
+                conversationHistory: conversationHistory,
+                userPrompt: userPrompt,
+                onTextChunk: onTextChunk
+            )
+        } catch {
+            guard AppBundleConfiguration.openAIAPIKey() != nil else {
+                throw error
+            }
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "error",
+                event: "voice.response_fallback",
+                fields: [
+                    "from": "codex_voice_session",
+                    "to": "openai_api_key",
+                    "error": error.localizedDescription
+                ]
             )
         }
 
-        claudeAgentSDKAPI.model = model
-        let (text, _) = try await claudeAgentSDKAPI.analyzeImageStreaming(
+        openAIAPI.model = model
+        let (text, _) = try await openAIAPI.analyzeImageStreaming(
             images: images,
             systemPrompt: systemPrompt,
             conversationHistory: conversationHistory,
@@ -5272,52 +5359,23 @@ final class CompanionManager: ObservableObject {
         return text
     }
 
-    private func analyzeOpenAIOrCodexVoiceResponse(
-        images: [(data: Data, label: String)],
-        model: String,
-        systemPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
-        userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
-    ) async throws -> String {
-        if AppBundleConfiguration.openAIAPIKey() != nil {
-            openAIAPI.model = model
-            let (text, _) = try await openAIAPI.analyzeImageStreaming(
-                images: images,
-                systemPrompt: systemPrompt,
-                conversationHistory: conversationHistory,
-                userPrompt: userPrompt,
-                onTextChunk: onTextChunk
-            )
-            return text
-        }
-
-        return try await analyzeCodexVoiceResponse(
-            images: images,
-            model: model,
-            systemPrompt: systemPrompt,
-            conversationHistory: conversationHistory,
-            userPrompt: userPrompt,
-            onTextChunk: onTextChunk
-        )
-    }
-
     private func analyzeCodexVoiceResponse(
         images: [(data: Data, label: String)],
         model: String,
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        let detector = CodexPointDetector(model: model)
-        return try await detector.analyzeImageResponse(
+        codexVoiceSession.model = model
+        let (text, _) = try await codexVoiceSession.analyzeImageStreaming(
             images: images,
             systemPrompt: systemPrompt,
             conversationHistory: conversationHistory,
             userPrompt: userPrompt,
             onTextChunk: onTextChunk
         )
+        return text
     }
 
     private func captureAllScreensForVoiceResponseIfAvailable() async throws -> [CompanionScreenCapture] {
@@ -5329,7 +5387,7 @@ final class CompanionManager: ObservableObject {
         capture: CompanionScreenCapture,
         systemPrompt: String,
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
         let selectedPointingModel = OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModel)
 
@@ -5422,11 +5480,28 @@ final class CompanionManager: ObservableObject {
     private static func shouldAttemptProactivePointing(for transcript: String) -> Bool {
         let normalizedTranscript = transcript.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
+        let normalizedCommandText = normalizedSpokenCommandText(transcript)
+
+        let voiceStatusPhrases = [
+            "can you hear",
+            "hear me",
+            "mic",
+            "microphone",
+            "not speaking",
+            "speaking",
+            "voice",
+            "audio",
+            "responding",
+            "response",
+            "slow",
+            "taking so long",
+            "lag"
+        ]
+        if voiceStatusPhrases.contains(where: { normalizedCommandText.contains($0) }) {
+            return false
+        }
 
         let screenRelatedPhrases = [
-            "this",
-            "that",
-            "here",
             "screen",
             "window",
             "button",
@@ -5442,6 +5517,26 @@ final class CompanionManager: ObservableObject {
             "how do i",
             "what is this",
             "what's this",
+            "this screen",
+            "this window",
+            "this button",
+            "this menu",
+            "this file",
+            "this folder",
+            "this tab",
+            "this setting",
+            "that screen",
+            "that window",
+            "that button",
+            "that menu",
+            "that file",
+            "that folder",
+            "that tab",
+            "that setting",
+            "right here",
+            "over here",
+            "up here",
+            "down here",
             "what am i looking at",
             "show me",
             "point",

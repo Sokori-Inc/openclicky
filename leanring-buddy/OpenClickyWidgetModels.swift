@@ -1,6 +1,6 @@
 import Foundation
 
-struct OpenClickyWidgetSnapshot: Codable, Equatable {
+nonisolated struct OpenClickyWidgetSnapshot: Codable, Equatable {
     static let schemaVersion = 1
 
     var schemaVersion: Int
@@ -22,7 +22,7 @@ struct OpenClickyWidgetSnapshot: Codable, Equatable {
     )
 }
 
-struct OpenClickyWidgetAgentSummary: Codable, Identifiable, Equatable {
+nonisolated struct OpenClickyWidgetAgentSummary: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
     var status: String
@@ -30,7 +30,7 @@ struct OpenClickyWidgetAgentSummary: Codable, Identifiable, Equatable {
     var updatedAt: Date
 }
 
-struct OpenClickyWidgetTodayStats: Codable, Equatable {
+nonisolated struct OpenClickyWidgetTodayStats: Codable, Equatable {
     var voiceInteractions: Int
     var agentTasksCreated: Int
     var agentCompletions: Int
@@ -52,8 +52,8 @@ struct OpenClickyWidgetTodayStats: Codable, Equatable {
     }
 }
 
-struct OpenClickyWidgetAttentionItem: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable, Equatable {
+nonisolated struct OpenClickyWidgetAttentionItem: Codable, Identifiable, Equatable {
+    nonisolated enum Kind: String, Codable, Equatable {
         case failedAgent
         case missingPermission
         case missingCredential
@@ -85,7 +85,7 @@ struct OpenClickyWidgetAttentionItem: Codable, Identifiable, Equatable {
     }
 }
 
-struct OpenClickyWidgetPrivacySettings: Codable, Equatable {
+nonisolated struct OpenClickyWidgetPrivacySettings: Codable, Equatable {
     var widgetsEnabled: Bool
     var includesAgentTaskNames: Bool
     var includesMemorySnippets: Bool
@@ -104,7 +104,7 @@ struct OpenClickyWidgetPrivacySettings: Codable, Equatable {
     }
 }
 
-enum OpenClickyWidgetDeepLink {
+nonisolated enum OpenClickyWidgetDeepLink {
     static let agents = URL(string: "openclicky://agents")!
     static let settings = URL(string: "openclicky://settings")!
     static let logs = URL(string: "openclicky://logs")!

@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum AppBundleConfiguration {
+nonisolated enum AppBundleConfiguration {
     static let userAnthropicAPIKeyDefaultsKey = "openClickyAnthropicAPIKey"
     static let userElevenLabsAPIKeyDefaultsKey = "openClickyElevenLabsAPIKey"
     static let userElevenLabsVoiceIDDefaultsKey = "openClickyElevenLabsVoiceID"
@@ -188,7 +188,7 @@ enum AppBundleConfiguration {
 }
 
 private extension String {
-    func trimmingMatchingQuotes() -> String {
+    nonisolated func trimmingMatchingQuotes() -> String {
         guard count >= 2 else { return self }
 
         if hasPrefix("\""), hasSuffix("\"") {

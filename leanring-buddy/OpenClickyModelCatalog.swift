@@ -1,6 +1,6 @@
 import Foundation
 
-enum OpenClickyModelProvider: String, Equatable {
+nonisolated enum OpenClickyModelProvider: String, Equatable {
     case anthropic
     case openAI
     case codex
@@ -17,13 +17,13 @@ enum OpenClickyModelProvider: String, Equatable {
     }
 }
 
-struct OpenClickyModelOption: Identifiable, Equatable {
+nonisolated struct OpenClickyModelOption: Identifiable, Equatable {
     let id: String
     let label: String
     let provider: OpenClickyModelProvider
 }
 
-enum OpenClickyModelCatalog {
+nonisolated enum OpenClickyModelCatalog {
     static let defaultVoiceResponseModelID = "claude-sonnet-4-6"
     static let defaultComputerUseModelID = "claude-sonnet-4-6"
     static let defaultCodexActionsModelID = "gpt-5.4"

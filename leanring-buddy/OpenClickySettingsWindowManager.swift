@@ -30,7 +30,8 @@ final class OpenClickySettingsWindowManager {
             backing: .buffered,
             defer: false
         )
-        settingsWindow.title = "OpenClicky Settings"
+        settingsWindow.title = ""
+        settingsWindow.titleVisibility = .hidden
         settingsWindow.minSize = minimumWindowSize
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.titlebarAppearsTransparent = true
