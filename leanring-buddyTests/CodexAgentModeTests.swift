@@ -97,6 +97,20 @@ struct CodexAgentModeTests {
         #expect(manager.codexHomeDirectory.lastPathComponent == "CodexHome")
     }
 
+    @Test func logReviewSetupCreatesMarkdownAndJSONLFiles() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let store = OpenClickyMessageLogStore(logDirectory: directory)
+        try Data("# Existing review notes\n".utf8).write(to: store.agentReviewCommentsFile)
+        store.ensureAgentReviewCommentsFile()
+
+        #expect(FileManager.default.fileExists(atPath: store.agentReviewCommentsFile.path))
+        #expect(FileManager.default.fileExists(atPath: store.reviewCommentsFile.path))
+    }
+
     @Test func jsonRPCRequestEncodingMatchesCodexAppServer() throws {
         let request = CodexRPCRequest(id: 7, method: "thread/start", params: [
             "experimentalRawEvents": false,

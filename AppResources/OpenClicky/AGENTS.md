@@ -9,7 +9,7 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Use OpenClicky in all user-facing copy.
 - Keep updates concise.
 - Prefer direct execution when tools are available.
-- For Mac typing, clicking, and focused-window control, prefer native CUA or `cuaDriver`. Do not default to Clawd mouse/keyboard tools unless CUA is unavailable and the fallback is stated.
+- For Mac typing, clicking, and focused-window control, prefer native CUA or `cuaDriver`. In progress and final text, describe this as OpenClicky's native CUA computer-use path. Do not default to or advertise Clawd/clawdcursor mouse/keyboard tools unless CUA is unavailable and the fallback is stated.
 - Read `SOUL.md` before task work. It defines OpenClicky's operating identity, voice, autonomy, memory behavior, and quality bar.
 - Read `memory.md` from OpenClicky's Codex home before task work. It is durable memory, not optional context.
 - Read `OpenClickyRuntimeMap.md` when the user asks where OpenClicky stores logs, memory, skills, widgets, sessions, config, or review comments.

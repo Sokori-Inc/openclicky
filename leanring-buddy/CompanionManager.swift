@@ -985,6 +985,15 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
+        if let filesystemInstruction = Self.implicitFilesystemTaskInstruction(from: transcript) {
+            print("OpenClicky filesystem request detected; starting agent task: \(filesystemInstruction)")
+            startVoiceAgentTask(
+                instruction: filesystemInstruction,
+                acknowledgement: Self.filesystemTaskAcknowledgement(from: transcript)
+            )
+            return true
+        }
+
         if let liveLookupInstruction = Self.implicitLiveLookupInstruction(from: transcript) {
             print("OpenClicky live lookup request detected; starting agent task: \(liveLookupInstruction)")
             startVoiceAgentTask(instruction: liveLookupInstruction)
@@ -1668,6 +1677,86 @@ final class CompanionManager: ObservableObject {
         return "Research the current answer to this request and report back concisely: \(trimmedTranscript)"
     }
 
+    private static func implicitFilesystemTaskInstruction(from transcript: String) -> String? {
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return nil }
+
+        let normalizedTranscript = trimmedTranscript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let localLocationSignals = [
+            "desktop",
+            "downloads",
+            "documents",
+            "folder",
+            "folders",
+            "directory",
+            "directories",
+            "file",
+            "files",
+            "finder",
+            "home folder",
+            "home directory",
+            "local path",
+            "on my mac"
+        ]
+
+        guard localLocationSignals.contains(where: { normalizedTranscript.contains($0) }) else {
+            return nil
+        }
+
+        let filesystemActionSignals = [
+            "browse",
+            "check",
+            "find",
+            "inspect",
+            "list",
+            "look at",
+            "look in",
+            "open",
+            "read",
+            "review",
+            "search",
+            "show",
+            "summarize",
+            "view",
+            "what files",
+            "what's in",
+            "what's on",
+            "whats in",
+            "whats on",
+            "what is in",
+            "what is on",
+            "where is",
+            "which file",
+            "which files"
+        ]
+
+        guard filesystemActionSignals.contains(where: { normalizedTranscript.contains($0) }) else {
+            return nil
+        }
+
+        return "Inspect the relevant local files or folders and report back concisely: \(trimmedTranscript)"
+    }
+
+    private static func filesystemTaskAcknowledgement(from transcript: String) -> String {
+        let normalizedTranscript = transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        if normalizedTranscript.contains("desktop") {
+            return "i'm checking your desktop now."
+        }
+        if normalizedTranscript.contains("downloads") {
+            return "i'm checking your downloads now."
+        }
+        if normalizedTranscript.contains("documents") {
+            return "i'm checking your documents now."
+        }
+        return "i'm checking those files now."
+    }
+
     private static func mentionsOpenClickyRuntimeStorage(_ transcript: String) -> Bool {
         let normalizedTranscript = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
@@ -1726,6 +1815,7 @@ final class CompanionManager: ObservableObject {
 
         return implicitComputerUseInstruction(from: transcript) != nil
             || implicitLiveLookupInstruction(from: transcript) != nil
+            || implicitFilesystemTaskInstruction(from: transcript) != nil
             || mentionsOpenClickyRuntimeStorage(transcript)
     }
 
@@ -1796,12 +1886,12 @@ final class CompanionManager: ObservableObject {
         return cleanedInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func startVoiceAgentTask(instruction: String) {
+    private func startVoiceAgentTask(instruction: String, acknowledgement: String? = nil) {
         interruptCurrentVoiceResponse()
         ensureCursorOverlayVisibleForAgentTask()
 
         let dockItemID = UUID()
-        let acknowledgement = "got it. i started an agent for \(Self.shortAgentInstructionSummary(instruction))."
+        let acknowledgement = acknowledgement ?? "got it. i started an agent for \(Self.shortAgentInstructionSummary(instruction))."
         let accentTheme = Self.nextAgentDockAccentTheme(existingCount: codexAgentSessions.count)
         let agentSession = createAndSelectNewCodexAgentSession(
             title: Self.shortAgentInstructionSummary(instruction),
@@ -2194,8 +2284,10 @@ final class CompanionManager: ObservableObject {
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
     - if the user's question relates to what's on their screen, reference specific things you see.
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
+    - for audio, voice playback, or "why are you not speaking" questions, give a short diagnosis or next check. do not summarize the screen unless the visible screen directly explains the audio problem.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - OpenClicky can open apps and use the computer through Agent Mode. direct action requests like "open chrome", "click that", "type this", "scroll down", or "switch to safari" are normally routed to Agent Mode before you answer. if the user asks whether you can do those things, say yes: OpenClicky can do that through Agent Mode.
+    - OpenClicky can inspect local files through Agent Mode when the user asks to browse, list, find, read, or review files or folders. if such a request reaches this voice model, return exactly [AGENT_TASK: inspect the relevant local files or folders and report back concisely] and no other text.
     - OpenClicky has durable local storage for logs, memory, learned skills, widget state, sessions, and config. if the user asks where those live, answer from the runtime storage context included below.
     - OpenClicky has a SOUL.md persona file. if the user asks who OpenClicky is, how it should behave, or to change its persona, use the soul path from runtime storage and route edits to Agent Mode.
     - if the user asks to view, edit, review, tune, fix, or inspect OpenClicky's logs, memory, learned skills, widget state, sessions, config, or review comments, return exactly [AGENT_TASK: the task the agent should do] and no other text.

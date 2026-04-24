@@ -56,13 +56,15 @@ final class OpenClickyMessageLogStore: @unchecked Sendable {
 
         do {
             try fileManager.createDirectory(at: logDirectory, withIntermediateDirectories: true)
-            guard !fileManager.fileExists(atPath: agentReviewCommentsFile.path) else { return }
-            let header = """
-            # OpenClicky Log Review Comments
+            if !fileManager.fileExists(atPath: agentReviewCommentsFile.path) {
+                let header = """
+                # OpenClicky Log Review Comments
 
-            Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, user comment, and raw JSONL entry.
-            """
-            try Data(header.utf8).write(to: agentReviewCommentsFile, options: [.atomic])
+                Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, user comment, and raw JSONL entry.
+                """
+                try Data(header.utf8).write(to: agentReviewCommentsFile, options: [.atomic])
+            }
+            try ensureEmptyJSONLReviewCommentsFileExists()
         } catch {
             print("OpenClicky log review comment file setup failed: \(error.localizedDescription)")
         }
@@ -95,6 +97,7 @@ final class OpenClickyMessageLogStore: @unchecked Sendable {
                 """
                 try Data(header.utf8).write(to: agentReviewCommentsFile, options: [.atomic])
             }
+            try ensureEmptyJSONLReviewCommentsFileExists()
 
             let isoFormatter = ISO8601DateFormatter()
             isoFormatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -179,6 +182,11 @@ final class OpenClickyMessageLogStore: @unchecked Sendable {
         } else {
             try data.write(to: fileURL, options: [.atomic])
         }
+    }
+
+    private func ensureEmptyJSONLReviewCommentsFileExists() throws {
+        guard !fileManager.fileExists(atPath: reviewCommentsFile.path) else { return }
+        try Data().write(to: reviewCommentsFile, options: [.atomic])
     }
 
     private static func defaultLogDirectory(fileManager: FileManager) -> URL {
