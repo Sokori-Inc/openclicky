@@ -248,10 +248,10 @@ struct ClickyResponseCardCompactView: View {
                 if let dismiss = actionHandlers.dismiss {
                     Button(action: dismiss) {
                         Text(card.completionLabel)
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(DS.Colors.accentText)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
                             .background(Capsule().fill(DS.Colors.accent.opacity(0.22)))
                     }
                     .buttonStyle(.plain)
@@ -259,10 +259,10 @@ struct ClickyResponseCardCompactView: View {
                     .help("Dismiss")
                 } else {
                     Text(card.completionLabel)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundColor(DS.Colors.accentText)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
                         .background(Capsule().fill(DS.Colors.accent.opacity(0.22)))
                 }
 
@@ -271,7 +271,7 @@ struct ClickyResponseCardCompactView: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(DS.Colors.textTertiary)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 24, height: 24)
                             .background(Circle().fill(Color.white.opacity(0.08)))
                     }
                     .buttonStyle(.plain)
@@ -281,9 +281,9 @@ struct ClickyResponseCardCompactView: View {
             }
 
             Text(card.displayText.isEmpty ? "No response text yet." : card.displayText)
-                .font(.system(size: 17, weight: .bold))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundColor(DS.Colors.textPrimary)
-                .lineSpacing(2)
+                .lineSpacing(4)
                 .lineLimit(4)
                 .minimumScaleFactor(0.82)
                 .fixedSize(horizontal: false, vertical: true)
@@ -372,16 +372,16 @@ struct ClickyResponseCardCompactView: View {
             HStack(spacing: 7) {
                 if let systemImageName {
                     Image(systemName: systemImageName)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                 }
                 Text(title)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
             }
             .foregroundColor(foregroundColor)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
             .background(Capsule().fill(backgroundColor))
         }
         .buttonStyle(.plain)

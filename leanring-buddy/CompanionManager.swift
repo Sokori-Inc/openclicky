@@ -7,7 +7,8 @@
 //  exposes observable voice state for the panel UI.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
+import AppKit
 import Combine
 import Foundation
 import PostHog
@@ -83,6 +84,8 @@ final class CompanionManager: ObservableObject {
 
     private var onboardingMusicPlayer: AVAudioPlayer?
     private var onboardingMusicFadeTimer: Timer?
+    private var onboardingMusicFadeStepsRemaining = 0
+    private var onboardingMusicFadeVolumeDecrement: Float = 0
 
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
@@ -145,19 +148,24 @@ final class CompanionManager: ObservableObject {
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
-    private var fallbackSpeechSynthesizer: NSSpeechSynthesizer?
+    private var fallbackSpeechSynthesizer: AVSpeechSynthesizer?
+    private var pendingAgentVoiceFollowUpSessionID: UUID?
+    private var pendingAgentVoiceFollowUpCreatedAt: Date?
+    private var announcedAgentFileURLs: Set<String> = []
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var controlDoubleTapCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var agentStatusCancellables: [UUID: AnyCancellable] = [:]
+    private var agentActivityCancellables: [UUID: AnyCancellable] = [:]
     private var tutorIdleCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
+    private var voiceFollowUpStopTask: Task<Void, Never>?
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -209,6 +217,7 @@ final class CompanionManager: ObservableObject {
         withID: UserDefaults.standard.string(forKey: "selectedComputerUseModel") ?? OpenClickyModelCatalog.defaultComputerUseModelID
     ).id
     @Published var isTutorModeEnabled: Bool = CompanionManager.initialTutorModeEnabled()
+    @Published var isAdvancedModeEnabled: Bool = UserDefaults.standard.bool(forKey: AppBundleConfiguration.userAdvancedModeDefaultsKey)
     private let userActivityIdleDetector = UserActivityIdleDetector()
     private var isTutorObservationInFlight = false
 
@@ -235,6 +244,14 @@ final class CompanionManager: ObservableObject {
             startTutorIdleObservation()
         } else {
             stopTutorIdleObservation()
+        }
+    }
+
+    func setAdvancedModeEnabled(_ enabled: Bool) {
+        isAdvancedModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: AppBundleConfiguration.userAdvancedModeDefaultsKey)
+        if !enabled {
+            codexHUDWindowManager.hide()
         }
     }
 
@@ -421,7 +438,9 @@ final class CompanionManager: ObservableObject {
 
             // After 1m 30s, fade the music out over 3s
             onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in
-                self?.fadeOutOnboardingMusic()
+                Task { @MainActor [weak self] in
+                    self?.fadeOutOnboardingMusic()
+                }
             }
         } catch {
             print("⚠️ OpenClicky: Failed to play onboarding music: \(error)")
@@ -434,19 +453,31 @@ final class CompanionManager: ObservableObject {
         let fadeSteps = 30
         let fadeDuration: Double = 3.0
         let stepInterval = fadeDuration / Double(fadeSteps)
-        let volumeDecrement = player.volume / Float(fadeSteps)
-        var stepsRemaining = fadeSteps
+        onboardingMusicFadeStepsRemaining = fadeSteps
+        onboardingMusicFadeVolumeDecrement = player.volume / Float(fadeSteps)
 
-        onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { [weak self] timer in
-            stepsRemaining -= 1
-            player.volume -= volumeDecrement
-
-            if stepsRemaining <= 0 {
-                timer.invalidate()
-                player.stop()
-                self?.onboardingMusicPlayer = nil
-                self?.onboardingMusicFadeTimer = nil
+        onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.advanceOnboardingMusicFade()
             }
+        }
+    }
+
+    private func advanceOnboardingMusicFade() {
+        guard let player = onboardingMusicPlayer else {
+            onboardingMusicFadeTimer?.invalidate()
+            onboardingMusicFadeTimer = nil
+            return
+        }
+
+        onboardingMusicFadeStepsRemaining -= 1
+        player.volume -= onboardingMusicFadeVolumeDecrement
+
+        if onboardingMusicFadeStepsRemaining <= 0 {
+            onboardingMusicFadeTimer?.invalidate()
+            player.stop()
+            onboardingMusicPlayer = nil
+            onboardingMusicFadeTimer = nil
         }
     }
 
@@ -575,10 +606,12 @@ final class CompanionManager: ObservableObject {
     private func loadBundledKnowledgeIndex() {
         let bundledIndex = WikiManager.Index.loadForAppBundle()
         let memoriesDirectory = codexHomeManager.memoriesDirectory
+        let learnedSkillsDirectory = codexHomeManager.learnedSkillsDirectory
 
         do {
             try FileManager.default.createDirectory(at: memoriesDirectory, withIntermediateDirectories: true)
-            let memoryIndex = try WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [])
+            try FileManager.default.createDirectory(at: learnedSkillsDirectory, withIntermediateDirectories: true)
+            let memoryIndex = try WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [learnedSkillsDirectory])
             bundledKnowledgeIndex = bundledIndex.combined(with: memoryIndex)
         } catch {
             print("⚠️ OpenClicky memory index load failed: \(error)")
@@ -673,10 +706,22 @@ final class CompanionManager: ObservableObject {
     private func observeCodexAgentSession(_ session: CodexAgentSession) {
         guard agentStatusCancellables[session.id] == nil else { return }
 
+        session.onOpenableFileFound = { [weak self, weak session] fileURL in
+            guard let self, let session else { return }
+            self.handleAgentFoundOpenableFile(fileURL, session: session)
+        }
+
         agentStatusCancellables[session.id] = session.$status
             .receive(on: DispatchQueue.main)
             .sink { [weak self, sessionID = session.id] status in
                 self?.updateAgentDockItem(for: sessionID, status: status)
+            }
+
+        agentActivityCancellables[session.id] = session.$entries
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, sessionID = session.id, weak session] _ in
+                guard let session else { return }
+                self?.updateAgentDockItem(for: sessionID, status: session.status)
             }
     }
 
@@ -692,6 +737,26 @@ final class CompanionManager: ObservableObject {
         observeCodexAgentSession(session)
         activeCodexAgentSessionID = session.id
         return session
+    }
+
+    private func handleAgentFoundOpenableFile(_ fileURL: URL, session: CodexAgentSession) {
+        let standardizedURL = fileURL.standardizedFileURL
+        let eventKey = "\(session.id.uuidString)|\(standardizedURL.path)"
+        guard !announcedAgentFileURLs.contains(eventKey) else { return }
+
+        announcedAgentFileURLs.insert(eventKey)
+        NSWorkspace.shared.open(standardizedURL)
+        speakShortSystemResponse("hey, \(session.title) found \(Self.spokenFileName(for: standardizedURL)), showing it now.")
+    }
+
+    private static func spokenFileName(for fileURL: URL) -> String {
+        let name = fileURL.deletingPathExtension().lastPathComponent
+        let cleanedName = name
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        return cleanedName.isEmpty ? "the file" : cleanedName
     }
 
     func selectCodexAgentSession(_ sessionID: UUID) {
@@ -746,13 +811,7 @@ final class CompanionManager: ObservableObject {
                         // Partial transcripts are hidden (waveform-only UI)
                     },
                     submitDraftText: { [weak self] finalTranscript in
-                        self?.lastTranscript = finalTranscript
-                        print("🗣️ Companion received transcript: \(finalTranscript)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        if self?.startAgentTaskIfRequested(from: finalTranscript) == true {
-                            return
-                        }
-                        self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        self?.handleFinalVoiceTranscript(finalTranscript)
                     }
                 )
             }
@@ -768,6 +827,22 @@ final class CompanionManager: ObservableObject {
         case .none:
             break
         }
+    }
+
+    private func handleFinalVoiceTranscript(_ finalTranscript: String) {
+        lastTranscript = finalTranscript
+        print("Companion received transcript: \(finalTranscript)")
+        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+        if submitPendingAgentVoiceFollowUp(finalTranscript) {
+            return
+        }
+        if handleAgentStatusQuestionIfNeeded(from: finalTranscript) {
+            return
+        }
+        if startAgentTaskIfRequested(from: finalTranscript) {
+            return
+        }
+        sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
     }
 
     // MARK: - Companion Prompt
@@ -895,11 +970,127 @@ final class CompanionManager: ObservableObject {
         interruptCurrentVoiceResponse()
         clearDetectedElementLocation()
 
+        if handleAgentStatusQuestionIfNeeded(from: trimmedText) {
+            return
+        }
+
         if startAgentTaskIfRequested(from: trimmedText) {
             return
         }
 
         sendTranscriptToClaudeWithScreenshot(transcript: trimmedText)
+    }
+
+    private func submitPendingAgentVoiceFollowUp(_ transcript: String) -> Bool {
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return false }
+        guard let sessionID = pendingAgentVoiceFollowUpSessionID else { return false }
+        if let createdAt = pendingAgentVoiceFollowUpCreatedAt,
+           Date().timeIntervalSince(createdAt) > 90 {
+            pendingAgentVoiceFollowUpSessionID = nil
+            pendingAgentVoiceFollowUpCreatedAt = nil
+            return false
+        }
+        pendingAgentVoiceFollowUpSessionID = nil
+        pendingAgentVoiceFollowUpCreatedAt = nil
+
+        guard let session = codexAgentSessions.first(where: { $0.id == sessionID }) else {
+            speakShortSystemResponse("i lost track of that agent. open the agent dock and try again.")
+            return true
+        }
+
+        selectCodexAgentSession(sessionID)
+        submitAgentPrompt(trimmedTranscript, to: session)
+        speakShortSystemResponse("sent that to \(session.title).")
+        return true
+    }
+
+    private func handleAgentStatusQuestionIfNeeded(from transcript: String) -> Bool {
+        guard Self.isAgentStatusQuestion(transcript) else { return false }
+
+        let summary = agentStatusSpokenSummary()
+        latestVoiceResponseCard = ClickyResponseCard(
+            source: .voice,
+            rawText: summary,
+            contextTitle: "Agent status"
+        )
+        if codexAgentSessions.contains(where: { $0.hasVisibleActivity }) {
+            ensureCursorOverlayVisibleForAgentTask()
+            showAgentDockWindowNearCurrentScreen()
+        }
+        speakShortSystemResponse(summary)
+        return true
+    }
+
+    private func agentStatusSpokenSummary() -> String {
+        let visibleSessions = codexAgentSessions.filter(\.hasVisibleActivity)
+        guard !visibleSessions.isEmpty else {
+            return "no agents are running yet."
+        }
+
+        let runningCount = visibleSessions.filter { session in
+            switch session.status {
+            case .starting, .running:
+                return true
+            case .stopped, .ready, .failed:
+                return false
+            }
+        }.count
+        let failedCount = visibleSessions.filter { session in
+            if case .failed = session.status { return true }
+            return false
+        }.count
+        let readyCount = visibleSessions.filter { session in
+            if case .ready = session.status { return true }
+            return false
+        }.count
+
+        let headline: String
+        if runningCount > 0 {
+            headline = "\(Self.spokenCount(runningCount, singular: "agent", plural: "agents")) running"
+        } else if failedCount > 0 {
+            headline = "\(Self.spokenCount(failedCount, singular: "agent", plural: "agents")) needing attention"
+        } else {
+            headline = "\(Self.spokenCount(readyCount, singular: "agent", plural: "agents")) ready"
+        }
+
+        let details = visibleSessions
+            .suffix(3)
+            .map(\.statusSummaryLine)
+            .joined(separator: " ")
+
+        return "you have \(Self.spokenCount(visibleSessions.count, singular: "agent", plural: "agents")): \(headline). \(details)"
+    }
+
+    private static func isAgentStatusQuestion(_ transcript: String) -> Bool {
+        let normalizedTranscript = transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let mentionsAgent = normalizedTranscript.contains("agent") || normalizedTranscript.contains("agents") || normalizedTranscript.contains("codex")
+        guard mentionsAgent else { return false }
+
+        let statusPhrases = [
+            "how are",
+            "how is",
+            "how's",
+            "status",
+            "progress",
+            "doing",
+            "running",
+            "finished",
+            "done",
+            "up to",
+            "working on",
+            "what are",
+            "what's"
+        ]
+
+        return statusPhrases.contains { normalizedTranscript.contains($0) }
+    }
+
+    private static func spokenCount(_ count: Int, singular: String, plural: String) -> String {
+        count == 1 ? "one \(singular)" : "\(count) \(plural)"
     }
 
     private static func clickyAgentInstruction(from transcript: String) -> String? {
@@ -1307,24 +1498,35 @@ final class CompanionManager: ObservableObject {
 
     private func updateAgentDockItem(for sessionID: UUID, status: CodexAgentSessionStatus) {
         guard let itemIndex = agentDockItems.lastIndex(where: { $0.sessionID == sessionID }) else { return }
+        let activitySummary = codexAgentSessions
+            .first(where: { $0.id == sessionID })?
+            .latestActivitySummary
 
         switch status {
         case .starting:
             agentDockItems[itemIndex].status = .starting
+            agentDockItems[itemIndex].caption = activitySummary ?? "Starting the agent task."
         case .running:
             agentDockItems[itemIndex].status = .running
+            agentDockItems[itemIndex].caption = activitySummary ?? "Working through the task."
         case .ready:
             if agentDockItems[itemIndex].status == .running || agentDockItems[itemIndex].status == .starting {
                 agentDockItems[itemIndex].status = .done
+                agentDockItems[itemIndex].caption = activitySummary ?? "Done. Use voice or text to follow up."
             }
         case .failed:
             agentDockItems[itemIndex].status = .failed
+            agentDockItems[itemIndex].caption = activitySummary ?? "Needs attention. Ask for agent status to hear the error."
         case .stopped:
             break
         }
     }
 
     func openAgentDockItem(_ itemID: UUID) {
+        guard isAdvancedModeEnabled else {
+            prepareVoiceFollowUpForAgentDockItem(itemID)
+            return
+        }
         if let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID {
             selectCodexAgentSession(sessionID)
         }
@@ -1339,25 +1541,37 @@ final class CompanionManager: ObservableObject {
     }
 
     func prepareVoiceFollowUpForAgentDockItem(_ itemID: UUID) {
+        guard let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID else {
+            prepareForVoiceFollowUp()
+            return
+        }
+        pendingAgentVoiceFollowUpSessionID = sessionID
+        pendingAgentVoiceFollowUpCreatedAt = Date()
+        selectCodexAgentSession(sessionID)
         prepareForVoiceFollowUp()
     }
 
     func showTextFollowUpForAgentDockItem(_ itemID: UUID) {
         guard let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID else { return }
         selectCodexAgentSession(sessionID)
-        textModeWindowManager.show(
-            at: NSEvent.mouseLocation,
-            submitText: { [weak self] submittedText in
-                self?.submitTextFollowUpForActiveAgent(submittedText)
-            }
-        )
+        let submitText: (String) -> Void = { [weak self] submittedText in
+            self?.submitTextFollowUpForActiveAgent(submittedText)
+        }
+
+        if let textFollowUpOrigin = agentDockWindowManager.textFollowUpOrigin() {
+            textModeWindowManager.show(origin: textFollowUpOrigin, submitText: submitText)
+        } else {
+            textModeWindowManager.show(at: NSEvent.mouseLocation, submitText: submitText)
+        }
     }
 
     private func submitTextFollowUpForActiveAgent(_ submittedText: String) {
         let trimmedText = submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
         submitAgentPrompt(trimmedText, to: codexAgentSession)
-        showCodexHUD()
+        if isAdvancedModeEnabled {
+            showCodexHUD()
+        }
     }
 
     func submitAgentPromptFromUI(_ prompt: String) {
@@ -1378,7 +1592,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         currentResponseTask = nil
         elevenLabsTTSClient.stopPlayback()
-        fallbackSpeechSynthesizer?.stopSpeaking()
+        fallbackSpeechSynthesizer?.stopSpeaking(at: .immediate)
         fallbackSpeechSynthesizer = nil
     }
 
@@ -1640,10 +1854,19 @@ final class CompanionManager: ObservableObject {
                 } else {
                     userPromptForClaude = transcript
                 }
+                let memoryContext = codexHomeManager.persistentMemoryContext()
+                let voiceSystemPrompt = """
+                \(Self.companionVoiceResponseSystemPrompt)
+
+                persistent memory:
+                read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
+
+                \(memoryContext)
+                """
 
                 let fullResponseText = try await analyzeVoiceResponse(
                     images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    systemPrompt: voiceSystemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: userPromptForClaude,
                     onTextChunk: { _ in
@@ -1731,6 +1954,14 @@ final class CompanionManager: ObservableObject {
                 }
 
                 print("🧠 Conversation history: \(self.conversationHistory.count) exchanges")
+                do {
+                    try codexHomeManager.appendPersistentMemoryEvent(
+                        userRequest: transcript,
+                        agentResponse: spokenText
+                    )
+                } catch {
+                    print("⚠️ OpenClicky memory update failed: \(error)")
+                }
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
                 self.latestVoiceResponseCard = ClickyResponseCard(
@@ -1986,7 +2217,7 @@ final class CompanionManager: ObservableObject {
                 conversationHistory: conversationHistory,
                 userPrompt: userPrompt
             )
-            await onTextChunk(text)
+            onTextChunk(text)
             return text
         }
 
@@ -2050,7 +2281,7 @@ final class CompanionManager: ObservableObject {
                 displayWidthInPixels: capture.screenshotWidthInPixels,
                 displayHeightInPixels: capture.screenshotHeightInPixels
             )
-            await onTextChunk(text)
+            onTextChunk(text)
             return text
         case .openAI:
             openAIAPI.model = selectedPointingModel.id
@@ -2059,7 +2290,7 @@ final class CompanionManager: ObservableObject {
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt
             )
-            await onTextChunk(text)
+            onTextChunk(text)
             return text
         }
     }
@@ -2210,11 +2441,11 @@ final class CompanionManager: ObservableObject {
     private func speakResponseFailureFallback(_ error: Error) {
         guard !Self.isExpectedCancellation(error) else { return }
 
-        let utterance = userFacingResponseFailureMessage(for: error)
-        let synthesizer = NSSpeechSynthesizer()
-        fallbackSpeechSynthesizer?.stopSpeaking()
+        let utterance = AVSpeechUtterance(string: userFacingResponseFailureMessage(for: error))
+        let synthesizer = AVSpeechSynthesizer()
+        fallbackSpeechSynthesizer?.stopSpeaking(at: .immediate)
         fallbackSpeechSynthesizer = synthesizer
-        synthesizer.startSpeaking(utterance)
+        synthesizer.speak(utterance)
         voiceState = .responding
     }
 
@@ -2345,26 +2576,21 @@ final class CompanionManager: ObservableObject {
             onboardingPromptOpacity = 1.0
         }
 
-        var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < message.count else {
-                timer.invalidate()
-                // Auto-dismiss after 10 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-                    guard self.showOnboardingPrompt else { return }
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        self.onboardingPromptOpacity = 0.0
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        self.showOnboardingPrompt = false
-                        self.onboardingPromptText = ""
-                    }
-                }
-                return
+        Task { @MainActor [weak self] in
+            for character in message {
+                guard let self else { return }
+                self.onboardingPromptText.append(character)
+                try? await Task.sleep(nanoseconds: 30_000_000)
             }
-            let index = message.index(message.startIndex, offsetBy: currentIndex)
-            self.onboardingPromptText.append(message[index])
-            currentIndex += 1
+
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self, self.showOnboardingPrompt else { return }
+            withAnimation(.easeOut(duration: 0.3)) {
+                self.onboardingPromptOpacity = 0.0
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            self.showOnboardingPrompt = false
+            self.onboardingPromptText = ""
         }
     }
 
@@ -2473,13 +2699,17 @@ final class CompanionManager: ObservableObject {
     }
 
     func showCodexHUD() {
+        guard isAdvancedModeEnabled else { return }
         codexHUDWindowManager.show(
             companionManager: self,
             openMemory: { [weak self] in
                 self?.showMemoryWindow()
             },
             prepareVoiceFollowUp: { [weak self] in
-                self?.prepareForVoiceFollowUp()
+                guard let self else { return }
+                self.pendingAgentVoiceFollowUpSessionID = self.activeCodexAgentSessionID
+                self.pendingAgentVoiceFollowUpCreatedAt = Date()
+                self.prepareForVoiceFollowUp()
             }
         )
     }
@@ -2517,7 +2747,9 @@ final class CompanionManager: ObservableObject {
         let trimmedActionTitle = actionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedActionTitle.isEmpty else { return }
         submitAgentPrompt(trimmedActionTitle, to: codexAgentSession)
-        showCodexHUD()
+        if isAdvancedModeEnabled {
+            showCodexHUD()
+        }
     }
 
     func prepareForVoiceFollowUp() {
@@ -2527,6 +2759,41 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+
+        beginVoiceFollowUpCapture()
+    }
+
+    private func beginVoiceFollowUpCapture() {
+        guard !buddyDictationManager.isDictationInProgress else { return }
+
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        voiceFollowUpStopTask?.cancel()
+        interruptCurrentVoiceResponse()
+        clearDetectedElementLocation()
+        ClickyAnalytics.trackPushToTalkStarted()
+
+        Task {
+            await buddyDictationManager.startAutoSubmittingDictationFromMicrophoneButton(
+                currentDraftText: "",
+                updateDraftText: { _ in
+                    // Partial transcripts stay hidden; the cursor waveform is the active state.
+                },
+                submitDraftText: { [weak self] finalTranscript in
+                    self?.handleFinalVoiceTranscript(finalTranscript)
+                }
+            )
+        }
+
+        voiceFollowUpStopTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            await MainActor.run {
+                guard let self else { return }
+                self.voiceFollowUpStopTask = nil
+                ClickyAnalytics.trackPushToTalkReleased()
+                self.buddyDictationManager.stopPersistentDictationFromMicrophoneButton()
+            }
         }
     }
 
@@ -2545,6 +2812,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func warmUpCodexAgentMode() {
+        guard isAdvancedModeEnabled else { return }
         codexAgentSession.warmUp()
         showCodexHUD()
     }
@@ -2623,15 +2891,15 @@ final class ClickyTextModeWindowManager {
     private let panelSize = NSSize(width: 340, height: 54)
 
     func show(at cursorLocation: CGPoint, submitText: @escaping (String) -> Void) {
-        if panel == nil {
-            createPanel(submitText: submitText)
-        } else if let hostingView = panel?.contentView as? NSHostingView<ClickyTextModeInputView> {
-            hostingView.rootView = ClickyTextModeInputView(submitText: submitText) { [weak self] in
-                self?.hide()
-            }
-        }
-
+        preparePanel(submitText: submitText)
         positionPanel(near: cursorLocation)
+        panel?.makeKeyAndOrderFront(nil)
+        panel?.orderFrontRegardless()
+    }
+
+    func show(origin: CGPoint, submitText: @escaping (String) -> Void) {
+        preparePanel(submitText: submitText)
+        positionPanel(at: origin)
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
     }
@@ -2669,6 +2937,16 @@ final class ClickyTextModeWindowManager {
         panel = textModePanel
     }
 
+    private func preparePanel(submitText: @escaping (String) -> Void) {
+        if panel == nil {
+            createPanel(submitText: submitText)
+        } else if let hostingView = panel?.contentView as? NSHostingView<ClickyTextModeInputView> {
+            hostingView.rootView = ClickyTextModeInputView(submitText: submitText) { [weak self] in
+                self?.hide()
+            }
+        }
+    }
+
     private func positionPanel(near cursorLocation: CGPoint) {
         guard let panel else { return }
 
@@ -2681,6 +2959,19 @@ final class ClickyTextModeWindowManager {
         let clampedOrigin = CGPoint(
             x: min(max(proposedOrigin.x, visibleFrame.minX + 10), visibleFrame.maxX - panelSize.width - 10),
             y: min(max(proposedOrigin.y, visibleFrame.minY + 10), visibleFrame.maxY - panelSize.height - 10)
+        )
+
+        panel.setFrame(NSRect(origin: clampedOrigin, size: panelSize), display: true)
+    }
+
+    private func positionPanel(at origin: CGPoint) {
+        guard let panel else { return }
+
+        let targetScreen = NSScreen.screens.first { $0.frame.contains(origin) } ?? NSScreen.main
+        let visibleFrame = targetScreen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
+        let clampedOrigin = CGPoint(
+            x: min(max(origin.x, visibleFrame.minX + 10), visibleFrame.maxX - panelSize.width - 10),
+            y: min(max(origin.y, visibleFrame.minY + 10), visibleFrame.maxY - panelSize.height - 10)
         )
 
         panel.setFrame(NSRect(origin: clampedOrigin, size: panelSize), display: true)

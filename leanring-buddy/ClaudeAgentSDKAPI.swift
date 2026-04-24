@@ -85,7 +85,9 @@ final class ClaudeAgentSDKAPI {
             )
         }
 
-        await onTextChunk(text)
+        await MainActor.run {
+            onTextChunk(text)
+        }
         return (text: text, duration: Date().timeIntervalSince(startedAt))
     }
 

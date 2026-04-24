@@ -371,6 +371,12 @@ struct ClickyResponseCard: Identifiable, Equatable {
         text = text.replacingOccurrences(of: #"\[POINT:[^\]]+\]"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?m)^\s{0,3}#{1,6}\s+.*$"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?m)^\s*[-*_]{3,}\s*$"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(
+            of: #"(?m)^\s*(\$|>|%|find\s|mdfind\s|rg\s|grep\s|ls\s|cat\s|sed\s|awk\s|python\s|node\s|npm\s|swift\s|open\s|osascript\s).*$"#,
+            with: " ",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        text = text.replacingOccurrences(of: #"(?m)^\s*(exit\s+\d+|stdout:|stderr:|command:).*$"#, with: " ", options: [.regularExpression, .caseInsensitive])
         text = text.replacingOccurrences(of: #"[`*_>#]"#, with: "", options: .regularExpression)
         text = text.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -476,6 +482,7 @@ struct WikiViewerEntry: Identifiable, Equatable {
 }
 
 extension WikiManager.Index {
+    @MainActor
     var viewerEntries: [WikiViewerEntry] {
         let articleEntries = articles.map(WikiViewerEntry.init(article:))
         let skillEntries = skills.map(WikiViewerEntry.init(skill:))

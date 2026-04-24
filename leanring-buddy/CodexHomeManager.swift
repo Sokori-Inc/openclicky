@@ -5,13 +5,17 @@ struct CodexHomeLayout: Equatable {
     let configFile: URL
     let modelInstructionsFile: URL
     let bundledSkillsDirectory: URL
+    let learnedSkillsDirectory: URL
     let bundledWikiSeedDirectory: URL
+    let persistentMemoryFile: URL
 }
 
 final class CodexHomeManager {
     let modelInstructionsFileName = "OpenClickyModelInstructions.md"
     let bundledSkillsDirectoryName = "OpenClickyBundledSkills"
+    let learnedSkillsDirectoryName = "OpenClickyLearnedSkills"
     let bundledWikiSeedDirectoryName = "OpenClickyBundledWikiSeed"
+    let persistentMemoryFileName = "memory.md"
 
     let fileManager: FileManager
     let applicationSupportDirectory: URL
@@ -43,6 +47,14 @@ final class CodexHomeManager {
         codexHomeDirectory.appendingPathComponent("memories", isDirectory: true)
     }
 
+    var learnedSkillsDirectory: URL {
+        codexHomeDirectory.appendingPathComponent(learnedSkillsDirectoryName, isDirectory: true)
+    }
+
+    var persistentMemoryFile: URL {
+        codexHomeDirectory.appendingPathComponent(persistentMemoryFileName, isDirectory: false)
+    }
+
     var modelProviderID: String {
         ClickyCodexBackend.isDefaultOpenAIBaseURL(workerBaseURL)
             ? ClickyCodexConfigTemplate.defaultModelProviderID
@@ -54,6 +66,8 @@ final class CodexHomeManager {
         try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: home.appendingPathComponent("sessions", isDirectory: true), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: memoriesDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: learnedSkillsDirectory, withIntermediateDirectories: true)
+        try ensurePersistentMemoryFile()
 
         let modelInstructions = home.appendingPathComponent(modelInstructionsFileName, isDirectory: false)
         if let source = resourceURL(named: modelInstructionsFileName, bundle: bundle) {
@@ -86,6 +100,7 @@ final class CodexHomeManager {
             workerBaseURL: workerBaseURL,
             modelInstructionsFileName: modelInstructionsFileName,
             bundledSkillsDirectoryName: bundledSkillsDirectoryName,
+            learnedSkillsDirectoryName: learnedSkillsDirectoryName,
             includeOpenAIDeveloperDocsMCP: true
         )
         let configFile = home.appendingPathComponent("config.toml", isDirectory: false)
@@ -97,8 +112,63 @@ final class CodexHomeManager {
             configFile: configFile,
             modelInstructionsFile: modelInstructions,
             bundledSkillsDirectory: skills,
-            bundledWikiSeedDirectory: wikiSeed
+            learnedSkillsDirectory: learnedSkillsDirectory,
+            bundledWikiSeedDirectory: wikiSeed,
+            persistentMemoryFile: persistentMemoryFile
         )
+    }
+
+    func appendPersistentMemoryEvent(userRequest: String, agentResponse: String, createdAt: Date = Date()) throws {
+        try fileManager.createDirectory(at: codexHomeDirectory, withIntermediateDirectories: true)
+        try ensurePersistentMemoryFile()
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        let entry = """
+
+        ## \(isoFormatter.string(from: createdAt)) - Agent task
+
+        - User asked: \(Self.singleLineSnippet(from: userRequest, maxLength: 320))
+        - Result: \(Self.singleLineSnippet(from: agentResponse, maxLength: 520))
+        """
+
+        let fileHandle = try FileHandle(forWritingTo: persistentMemoryFile)
+        defer { try? fileHandle.close() }
+        try fileHandle.seekToEnd()
+        if let data = entry.data(using: .utf8) {
+            try fileHandle.write(contentsOf: data)
+        }
+    }
+
+    func persistentMemoryContext(maxCharacters: Int = 6_000) -> String {
+        do {
+            try ensurePersistentMemoryFile()
+            let text = try String(contentsOf: persistentMemoryFile, encoding: .utf8)
+            guard text.count > maxCharacters else { return text }
+            let startIndex = text.index(text.endIndex, offsetBy: -maxCharacters)
+            return String(text[startIndex...])
+        } catch {
+            return "OpenClicky persistent memory is not available yet: \(error.localizedDescription)"
+        }
+    }
+
+    func createLearnedSkillIfNeeded(name: String, title: String, description: String, body: String) throws {
+        let skillDirectory = learnedSkillsDirectory.appendingPathComponent(Self.slug(from: name).replacingOccurrences(of: "-", with: "_"), isDirectory: true)
+        let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+        guard !fileManager.fileExists(atPath: skillFile.path) else { return }
+
+        try fileManager.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+        let skillMarkdown = """
+        ---
+        name: "\(Self.escapeFrontmatterValue(name))"
+        description: "\(Self.escapeFrontmatterValue(description))"
+        ---
+
+        # \(title)
+
+        \(body)
+        """
+        try skillMarkdown.write(to: skillFile, atomically: true, encoding: .utf8)
     }
 
     @discardableResult
@@ -189,6 +259,25 @@ final class CodexHomeManager {
         try fileManager.copyItem(at: source, to: destination)
     }
 
+    private func ensurePersistentMemoryFile() throws {
+        guard !fileManager.fileExists(atPath: persistentMemoryFile.path) else { return }
+
+        let initialMemory = """
+        # OpenClicky Persistent Memory
+
+        This file is OpenClicky's durable memory for Agent Mode. Agents must read it before starting user tasks and update it when they learn stable facts, preferences, project context, or reusable workflow knowledge.
+
+        ## Standing Rules
+
+        - Do not tell the user that you cannot remember outside the current conversation. Read and update this file instead.
+        - Store stable preferences, useful facts, active project context, and concise task outcomes.
+        - Keep entries short and useful. Prefer durable context over raw logs.
+        - When a task reveals a repeatable workflow, create or update a skill in `OpenClickyLearnedSkills/<workflow_name>/SKILL.md`.
+        """
+
+        try initialMemory.write(to: persistentMemoryFile, atomically: true, encoding: .utf8)
+    }
+
     private func uniqueMemoryFileURL(baseFilename: String) -> URL {
         var attempt = 0
         while true {
@@ -210,6 +299,21 @@ final class CodexHomeManager {
 
     private static func escapeFrontmatterValue(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func singleLineSnippet(from text: String, maxLength: Int) -> String {
+        let flattened = text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        guard flattened.count > maxLength else { return flattened }
+        let endIndex = flattened.index(flattened.startIndex, offsetBy: maxLength)
+        let prefix = String(flattened[..<endIndex])
+        if let lastSpace = prefix.lastIndex(of: " ") {
+            return "\(prefix[..<lastSpace])..."
+        }
+        return "\(prefix)..."
     }
 
     private static func defaultApplicationSupportDirectory(fileManager: FileManager) -> URL {

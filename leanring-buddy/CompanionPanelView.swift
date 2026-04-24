@@ -51,12 +51,13 @@ struct CompanionPanelView: View {
         .frame(
             minWidth: 356,
             maxWidth: .infinity,
-            minHeight: 428,
-            maxHeight: .infinity,
             alignment: .topLeading
         )
         .background(panelBackground)
-        .onChange(of: isShowingSettings) { _ in
+        .onChange(of: isShowingSettings) { _, isShowingSettings in
+            schedulePanelContentSizeRefresh(isShowingSettings: isShowingSettings)
+        }
+        .onChange(of: companionManager.isAdvancedModeEnabled) {
             schedulePanelContentSizeRefresh(isShowingSettings: isShowingSettings)
         }
         .animation(.easeOut(duration: 0.16), value: isShowingSettings)
@@ -88,7 +89,7 @@ struct CompanionPanelView: View {
                     .padding(.horizontal, 14)
             }
 
-            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted && companionManager.isAdvancedModeEnabled {
                 Spacer()
                     .frame(height: 12)
 
@@ -103,6 +104,8 @@ struct CompanionPanelView: View {
                     setClickyCursorEnabled: { companionManager.setClickyCursorEnabled($0) },
                     isTutorModeEnabled: companionManager.isTutorModeEnabled,
                     setTutorModeEnabled: { companionManager.setTutorModeEnabled($0) },
+                    isAdvancedModeEnabled: companionManager.isAdvancedModeEnabled,
+                    setAdvancedModeEnabled: { companionManager.setAdvancedModeEnabled($0) },
                     selectedCompanionModelID: companionManager.selectedModel,
                     setSelectedCompanionModel: { companionManager.setSelectedModel($0) },
                     selectedComputerUseModelID: companionManager.selectedComputerUseModel,
@@ -157,7 +160,7 @@ struct CompanionPanelView: View {
 
             bottomClickyControlsSection
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Header
@@ -834,6 +837,8 @@ struct CompanionPanelView: View {
             setClickyCursorEnabled: { companionManager.setClickyCursorEnabled($0) },
             isTutorModeEnabled: companionManager.isTutorModeEnabled,
             setTutorModeEnabled: { companionManager.setTutorModeEnabled($0) },
+            isAdvancedModeEnabled: companionManager.isAdvancedModeEnabled,
+            setAdvancedModeEnabled: { companionManager.setAdvancedModeEnabled($0) },
             selectedCompanionModelID: companionManager.selectedModel,
             setSelectedCompanionModel: { companionManager.setSelectedModel($0) },
             selectedComputerUseModelID: companionManager.selectedComputerUseModel,
@@ -1051,7 +1056,7 @@ struct CompanionPanelView: View {
                     )
                     #endif
 
-                    if companionManager.hasCompletedOnboarding {
+                    if companionManager.hasCompletedOnboarding && companionManager.isAdvancedModeEnabled {
                         footerIconButton(
                             systemImageName: "books.vertical",
                             helpText: "Open memory",

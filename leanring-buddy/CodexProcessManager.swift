@@ -1,6 +1,6 @@
 import Foundation
 
-final class CodexProcessManager {
+final class CodexProcessManager: @unchecked Sendable {
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?

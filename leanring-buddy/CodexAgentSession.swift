@@ -93,6 +93,43 @@ final class CodexAgentSession: ObservableObject, Identifiable {
     ).id
     @Published var workingDirectoryPath: String = UserDefaults.standard.string(forKey: "clickyCodexWorkingDirectory")
         ?? FileManager.default.homeDirectoryForCurrentUser.path
+    var onOpenableFileFound: (@MainActor (URL) -> Void)?
+
+    var statusSummaryLine: String {
+        let taskTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "untitled task" : title
+        let latestActivity = latestActivitySummary
+
+        switch status {
+        case .stopped:
+            return "\(taskTitle) is offline."
+        case .starting:
+            return "\(taskTitle) is starting."
+        case .running:
+            if let latestActivity {
+                return "\(taskTitle) is running. Latest: \(latestActivity)"
+            }
+            return "\(taskTitle) is running."
+        case .ready:
+            if let latestActivity {
+                return "\(taskTitle) is ready. Latest: \(latestActivity)"
+            }
+            return "\(taskTitle) is ready."
+        case .failed:
+            let errorText = lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let errorText, !errorText.isEmpty {
+                return "\(taskTitle) needs attention: \(Self.spokenSnippet(from: errorText, maxLength: 110))"
+            }
+            return "\(taskTitle) needs attention."
+        }
+    }
+
+    var latestActivitySummary: String? {
+        Self.latestActivitySummary(from: entries)
+    }
+
+    var hasVisibleActivity: Bool {
+        !entries.isEmpty || activeThreadID != nil || status != .stopped
+    }
 
     private let homeManager: CodexHomeManager
     private let processManager: CodexProcessManager
@@ -104,14 +141,14 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         id: UUID = UUID(),
         title: String = "Agent",
         accentTheme: ClickyAccentTheme = .blue,
-        homeManager: CodexHomeManager = CodexHomeManager(),
-        processManager: CodexProcessManager = CodexProcessManager()
+        homeManager: CodexHomeManager? = nil,
+        processManager: CodexProcessManager? = nil
     ) {
         self.id = id
         self.title = title
         self.accentTheme = accentTheme
-        self.homeManager = homeManager
-        self.processManager = processManager
+        self.homeManager = homeManager ?? CodexHomeManager()
+        self.processManager = processManager ?? CodexProcessManager()
 
         self.processManager.onNotification = { [weak self] notification in
             Task { @MainActor in
@@ -147,7 +184,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         lastSubmittedPrompt = trimmed
         entries.append(CodexTranscriptEntry(role: .user, text: trimmed))
         Task {
-            await runPrompt(Self.promptForModel(prompt: trimmed, screenContext: screenContext))
+            await runPrompt(promptForModel(prompt: trimmed, screenContext: screenContext))
         }
     }
 
@@ -206,16 +243,31 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         }
     }
 
-    private static func promptForModel(prompt: String, screenContext: CodexAgentScreenContext?) -> String {
+    private func promptForModel(prompt: String, screenContext: CodexAgentScreenContext?) -> String {
+        let taskBrief = """
+        OpenClicky Agent Mode brief:
+        - User request: \(prompt)
+        - Work as an independent background agent. Each OpenClicky agent session has its own Codex runtime, thread, and process; do not assume another agent has your local state.
+        - Persistent memory file: \(homeManager.persistentMemoryFile.path)
+        - Learned skills directory: \(homeManager.learnedSkillsDirectory.path)
+        - Before working, read the persistent memory file if it exists and check learned skills for a matching workflow.
+        - Do not say you cannot remember outside the current conversation. Use the persistent memory file.
+        - Update persistent memory when you learn stable preferences, useful project facts, task outcomes, file locations, or workflow context.
+        - When you complete a new repeatable workflow, create or update a learned skill at \(homeManager.learnedSkillsDirectory.path)/<snake_case_workflow_name>/SKILL.md. For example, creating an Apple Note should create or update create_apple_note.
+        - Proceed autonomously. Choose sensible defaults and keep working without asking the user unless critical information is truly missing or the action would be destructive, credential-related, or permission-sensitive.
+        - Voice is the primary interaction path. Keep user-facing progress and final answers concise enough to be spoken aloud, and put detailed logs or code context in the transcript when needed.
+        - When you find a local document, image, or other user file, include its exact local path in your final answer so OpenClicky can show it.
+        - If blocked, report the exact blocker and the smallest user action needed. If not blocked, finish the task and summarize what changed or what you found.
+        """
+
         guard let context = screenContext, !context.isEmpty else {
-            return prompt
+            return taskBrief
         }
 
         return """
         \(context.promptPrefix())
 
-        User task:
-        \(prompt)
+        \(taskBrief)
         """
     }
 
@@ -240,6 +292,10 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             ?? "You are OpenClicky, a friendly macOS cursor companion with Codex Agent Mode."
         let developerInstructions = """
         You are running inside OpenClicky Agent Mode on macOS. Be direct, helpful, and careful. Prefer concrete actions over vague advice.
+
+        Persistent memory is mandatory. Read \(layout.persistentMemoryFile.path) before task work, then update it when useful durable context is learned. Never tell the user you cannot remember outside the current conversation; use this memory file instead.
+
+        Self-improving workflow skills are mandatory. Before starting a workflow, check \(layout.learnedSkillsDirectory.path) for a matching learned skill. After completing a new repeatable workflow, create or update \(layout.learnedSkillsDirectory.path)/<snake_case_workflow_name>/SKILL.md with the exact steps, tools, paths, and gotchas that made the workflow succeed. Example: creating an Apple Note should produce \(layout.learnedSkillsDirectory.path)/create_apple_note/SKILL.md.
 
         You are allowed to help with computer-use tasks. When the user asks you to open an app, switch apps, click, type, scroll, inspect the screen, or otherwise operate the Mac, use the available Codex computer-use/app-server capabilities to do it instead of only explaining how. If an action is unavailable in the current runtime, say that clearly and give the closest useful next step.
 
@@ -319,10 +375,10 @@ final class CodexAgentSession: ObservableObject, Identifiable {
                 entries.append(CodexTranscriptEntry(role: .plan, text: text))
             }
         case "command/exec/outputDelta", "item/commandExecution/outputDelta":
-            let delta = CodexJSON.string(params["delta"]) ?? CodexJSON.string(params["chunk"]) ?? ""
-            if !delta.isEmpty {
-                entries.append(CodexTranscriptEntry(role: .command, text: delta))
-            }
+            let itemID = CodexJSON.string(params["itemId"])
+                ?? CodexJSON.string(params["callId"])
+                ?? "active-command-progress"
+            upsertEntry(id: itemID, role: .command, text: "Working through the task...")
         case "turn/completed":
             currentAssistantEntryID = nil
             status = .ready
@@ -372,9 +428,13 @@ final class CodexAgentSession: ObservableObject, Identifiable {
                 upsertEntry(id: id, role: .assistant, text: text)
                 latestResponseCard = ClickyResponseCard(
                     source: .agent,
-                    rawText: text,
+                    rawText: Self.userFacingAgentMessage(from: text),
                     contextTitle: lastSubmittedPrompt
                 )
+                if let fileURL = Self.firstOpenableFileURL(in: text) {
+                    onOpenableFileFound?(fileURL)
+                }
+                persistCompletedTurnMemory(agentResponse: text)
             }
             currentAssistantEntryID = nil
         case "plan":
@@ -384,8 +444,12 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         case "commandExecution":
             let command = CodexJSON.string(item["command"]) ?? "Command"
             let output = CodexJSON.string(item["aggregatedOutput"]) ?? ""
-            let exitCode = CodexJSON.int(item["exitCode"]).map { "exit \($0)" } ?? "running"
-            upsertEntry(id: id, role: .command, text: "\(command) — \(exitCode)\n\(output)")
+            let exitCode = CodexJSON.int(item["exitCode"])
+            upsertEntry(
+                id: id,
+                role: .command,
+                text: Self.plainEnglishCommandSummary(command: command, output: output, exitCode: exitCode)
+            )
         default:
             break
         }
@@ -426,6 +490,210 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         NSSound(contentsOf: url, byReference: false)?.play()
     }
 
+    private func persistCompletedTurnMemory(agentResponse: String) {
+        guard let lastSubmittedPrompt else { return }
+
+        do {
+            try homeManager.appendPersistentMemoryEvent(
+                userRequest: lastSubmittedPrompt,
+                agentResponse: agentResponse
+            )
+            try createLearnedSkillIfApplicable(userRequest: lastSubmittedPrompt, agentResponse: agentResponse)
+        } catch {
+            entries.append(CodexTranscriptEntry(role: .system, text: "OpenClicky could not update persistent memory: \(error.localizedDescription)"))
+        }
+    }
+
+    private func createLearnedSkillIfApplicable(userRequest: String, agentResponse: String) throws {
+        let combinedText = "\(userRequest) \(agentResponse)"
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        guard combinedText.contains("note") || combinedText.contains("notes") else { return }
+
+        try homeManager.createLearnedSkillIfNeeded(
+            name: "create_apple_note",
+            title: "Create Apple Note",
+            description: "Use when the user asks OpenClicky to create, save, or update an Apple Note from spoken or typed instructions.",
+            body: """
+            Use this workflow when the user asks to create a note in Apple Notes or save something as a note.
+
+            ## Workflow
+
+            1. Derive a concise note title from the request. If the user provides a title, use it exactly.
+            2. Derive the note body from the request and any provided screen/file context. Keep formatting simple.
+            3. Use AppleScript through `osascript` to create the note in Apple Notes. Prefer the default account and the standard Notes folder.
+            4. Open or focus Notes only when useful for confirmation.
+            5. Keep the final response short: say the note was created and include the title.
+            6. Update `memory.md` with any durable preference or reusable detail learned during the note workflow.
+
+            ## AppleScript Pattern
+
+            ```applescript
+            tell application "Notes"
+                activate
+                set noteTitle to "Title"
+                set noteBody to "Body"
+                make new note at folder "Notes" of default account with properties {name:noteTitle, body:noteBody}
+            end tell
+            ```
+
+            If the default account or folder is unavailable, inspect the Notes accounts/folders and choose the most obvious personal Notes folder.
+            """
+        )
+    }
+
+    private static func userFacingAgentMessage(from text: String) -> String {
+        if let fileURL = firstOpenableFileURL(in: text) {
+            return "Found \(fileURL.lastPathComponent). Showing it now."
+        }
+
+        return text
+    }
+
+    private static func plainEnglishCommandSummary(command: String, output: String, exitCode: Int?) -> String {
+        let loweredCommand = command.lowercased()
+        let loweredOutput = output.lowercased()
+
+        if let exitCode, exitCode != 0 {
+            return "A tool step needs attention."
+        }
+
+        if loweredCommand.contains("mdfind")
+            || loweredCommand.contains(" find ")
+            || loweredCommand.hasPrefix("find ")
+            || loweredCommand.contains(" rg ")
+            || loweredCommand.hasPrefix("rg ")
+            || loweredCommand.contains(" grep ")
+            || loweredCommand.hasPrefix("grep ")
+            || loweredCommand.contains(" ls ")
+            || loweredCommand.hasPrefix("ls ") {
+            return "Looking for matching files..."
+        }
+
+        if loweredCommand.contains("open ")
+            || loweredCommand.contains("qlmanage")
+            || loweredCommand.contains("quick look")
+            || loweredOutput.contains("opened")
+            || loweredOutput.contains("showing") {
+            return "Showing the result..."
+        }
+
+        if loweredCommand.contains("osascript")
+            || loweredCommand.contains("tell application")
+            || loweredCommand.contains("activate") {
+            return "Focusing the right app..."
+        }
+
+        if loweredCommand.contains("swift")
+            || loweredCommand.contains("npm")
+            || loweredCommand.contains("node")
+            || loweredCommand.contains("python")
+            || loweredCommand.contains("pytest")
+            || loweredCommand.contains("test") {
+            return "Checking the work..."
+        }
+
+        return "Working through the task..."
+    }
+
+    private static func firstOpenableFileURL(in text: String, fileManager: FileManager = .default) -> URL? {
+        for candidate in pathCandidates(in: text) {
+            guard let fileURL = resolvedFileURL(from: candidate, fileManager: fileManager) else { continue }
+            return fileURL
+        }
+
+        return nil
+    }
+
+    private static func pathCandidates(in text: String) -> [String] {
+        var candidates: [String] = []
+
+        for delimiter in ["`", "\"", "'"] {
+            let parts = text.components(separatedBy: delimiter)
+            guard parts.count > 2 else { continue }
+            for index in stride(from: 1, to: parts.count, by: 2) {
+                candidates.append(parts[index])
+            }
+        }
+
+        for line in text.components(separatedBy: .newlines) {
+            for marker in ["~/", "/Users/", "/Volumes/", "/tmp/", "/var/"] {
+                guard let range = line.range(of: marker) else { continue }
+                let suffix = String(line[range.lowerBound...])
+                if let candidate = pathCandidateEndingAtKnownExtension(in: suffix) {
+                    candidates.append(candidate)
+                }
+            }
+        }
+
+        return candidates
+    }
+
+    private static func pathCandidateEndingAtKnownExtension(in text: String) -> String? {
+        let loweredText = text.lowercased()
+        var bestEnd: String.Index?
+
+        for fileExtension in openableFileExtensions {
+            guard let range = loweredText.range(of: ".\(fileExtension)") else { continue }
+            let end = text.index(text.startIndex, offsetBy: loweredText.distance(from: loweredText.startIndex, to: range.upperBound))
+            if bestEnd == nil || end < bestEnd! {
+                bestEnd = end
+            }
+        }
+
+        guard let bestEnd else { return nil }
+        return String(text[..<bestEnd])
+    }
+
+    private static func resolvedFileURL(from candidate: String, fileManager: FileManager) -> URL? {
+        let trimmed = candidate.trimmingCharacters(in: pathTrimCharacters)
+        guard !trimmed.isEmpty else { return nil }
+
+        let fileURL: URL
+        if trimmed.hasPrefix("~/") {
+            let relativePath = String(trimmed.dropFirst(2))
+            fileURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(relativePath)
+        } else if trimmed.hasPrefix("/") {
+            fileURL = URL(fileURLWithPath: trimmed)
+        } else {
+            return nil
+        }
+
+        guard openableFileExtensions.contains(fileURL.pathExtension.lowercased()) else { return nil }
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            return nil
+        }
+
+        return fileURL.standardizedFileURL
+    }
+
+    private static let openableFileExtensions: Set<String> = [
+        "csv",
+        "doc",
+        "docx",
+        "gif",
+        "heic",
+        "jpeg",
+        "jpg",
+        "key",
+        "md",
+        "numbers",
+        "pages",
+        "pdf",
+        "png",
+        "rtf",
+        "txt",
+        "webp",
+        "xls",
+        "xlsx"
+    ]
+
+    private static let pathTrimCharacters = CharacterSet.whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: "`'\".,;:)]}>"))
+
     private static func shortTitle(from prompt: String) -> String {
         let flattenedPrompt = prompt
             .components(separatedBy: .whitespacesAndNewlines)
@@ -442,5 +710,38 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             return String(prefix[..<lastSpace])
         }
         return prefix
+    }
+
+    private static func latestActivitySummary(from entries: [CodexTranscriptEntry]) -> String? {
+        guard let latestEntry = entries.reversed().first(where: { entry in
+            switch entry.role {
+            case .assistant, .plan, .system:
+                return !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .command, .user:
+                return false
+            }
+        }) else {
+            return nil
+        }
+
+        return spokenSnippet(from: latestEntry.text, maxLength: 120)
+    }
+
+    private static func spokenSnippet(from text: String, maxLength: Int) -> String {
+        let flattened = text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        guard flattened.count > maxLength else {
+            return flattened
+        }
+
+        let endIndex = flattened.index(flattened.startIndex, offsetBy: maxLength)
+        let prefix = String(flattened[..<endIndex])
+        if let lastSpace = prefix.lastIndex(of: " ") {
+            return "\(prefix[..<lastSpace])..."
+        }
+        return "\(prefix)..."
     }
 }

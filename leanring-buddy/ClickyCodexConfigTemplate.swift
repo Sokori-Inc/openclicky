@@ -9,6 +9,7 @@ struct ClickyCodexConfigTemplate: Equatable {
     var workerBaseURL: URL
     var modelInstructionsFileName: String
     var bundledSkillsDirectoryName: String
+    var learnedSkillsDirectoryName: String
     var includeOpenAIDeveloperDocsMCP: Bool
 
     init(
@@ -17,6 +18,7 @@ struct ClickyCodexConfigTemplate: Equatable {
         workerBaseURL: URL = ClickyCodexBackend.configuredWorkerBaseURL(),
         modelInstructionsFileName: String = "OpenClickyModelInstructions.md",
         bundledSkillsDirectoryName: String = "OpenClickyBundledSkills",
+        learnedSkillsDirectoryName: String = "OpenClickyLearnedSkills",
         includeOpenAIDeveloperDocsMCP: Bool = true
     ) {
         self.model = model
@@ -24,6 +26,7 @@ struct ClickyCodexConfigTemplate: Equatable {
         self.workerBaseURL = workerBaseURL
         self.modelInstructionsFileName = modelInstructionsFileName
         self.bundledSkillsDirectoryName = bundledSkillsDirectoryName
+        self.learnedSkillsDirectoryName = learnedSkillsDirectoryName
         self.includeOpenAIDeveloperDocsMCP = includeOpenAIDeveloperDocsMCP
     }
 
@@ -82,6 +85,11 @@ struct ClickyCodexConfigTemplate: Equatable {
             "[[skills.config]]",
             "model_instructions_file = \"\(escape(modelInstructionsFileName))\"",
             "bundled_skills_dir = \"\(escape(bundledSkillsDirectoryName))\"",
+            "enabled = true",
+            "",
+            "[[skills.config]]",
+            "model_instructions_file = \"\(escape(modelInstructionsFileName))\"",
+            "bundled_skills_dir = \"\(escape(learnedSkillsDirectoryName))\"",
             "enabled = true"
         ])
 

@@ -249,7 +249,7 @@ private struct CodexHUDView: View {
                 }
                 .padding(10)
             }
-            .onChange(of: session.entries.count) { _ in
+            .onChange(of: session.entries.count) {
                 if let id = session.entries.last?.id {
                     withAnimation(.easeOut(duration: 0.18)) {
                         proxy.scrollTo(id, anchor: .bottom)

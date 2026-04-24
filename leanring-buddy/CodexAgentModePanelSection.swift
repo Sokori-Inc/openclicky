@@ -12,6 +12,8 @@ struct CodexAgentModePanelSection: View {
     var setClickyCursorEnabled: (Bool) -> Void
     var isTutorModeEnabled: Bool
     var setTutorModeEnabled: (Bool) -> Void
+    var isAdvancedModeEnabled: Bool
+    var setAdvancedModeEnabled: (Bool) -> Void
     var selectedCompanionModelID: String
     var setSelectedCompanionModel: (String) -> Void
     var selectedComputerUseModelID: String
@@ -259,6 +261,8 @@ struct CodexAgentModeSettingsSheet: View {
     var setClickyCursorEnabled: (Bool) -> Void
     var isTutorModeEnabled: Bool
     var setTutorModeEnabled: (Bool) -> Void
+    var isAdvancedModeEnabled: Bool
+    var setAdvancedModeEnabled: (Bool) -> Void
     var selectedCompanionModelID: String
     var setSelectedCompanionModel: (String) -> Void
     var selectedComputerUseModelID: String
@@ -300,109 +304,129 @@ struct CodexAgentModeSettingsSheet: View {
                     }
 
                     settingsSection(
-                        title: "Screen pointing model",
-                        subtitle: "Used for cursor pointing. Claude uses Anthropic Computer Use; Codex uses local Codex sign-in and image input."
+                        title: "Advanced mode",
+                        subtitle: "Reveals the agent dashboard, inline agent input, model controls, API key overrides, and memory tools."
                     ) {
-                        modelOptionGrid(
-                            options: OpenClickyModelCatalog.computerUseModels,
-                            selectedModelID: selectedComputerUseModelID,
-                            select: setSelectedComputerUseModel
-                        )
+                        advancedModeToggleRow
                     }
 
-                    settingsSection(
-                        title: "Coding and actions model",
-                        subtitle: "Used when you say \"Hey Agent\", \"Clicky Agent\", or \"OpenClicky Agent\". The bundled Codex runtime uses local ChatGPT sign-in when no OpenAI key is set."
-                    ) {
-                        modelOptionGrid(
-                            options: OpenClickyModelCatalog.codexActionsModels,
-                            selectedModelID: session.model,
-                            select: session.setModel
-                        )
-                    }
+                    if isAdvancedModeEnabled {
+                        settingsSection(
+                            title: "Screen pointing model",
+                            subtitle: "Used for cursor pointing. Claude uses Anthropic Computer Use; Codex uses local Codex sign-in and image input."
+                        ) {
+                            modelOptionGrid(
+                                options: OpenClickyModelCatalog.computerUseModels,
+                                selectedModelID: selectedComputerUseModelID,
+                                select: setSelectedComputerUseModel
+                            )
+                        }
 
-                    settingsSection(
-                        title: "API keys",
-                        subtitle: "Optional overrides. Leave Anthropic or Codex blank to use local Claude Code or Codex sign-in when available."
-                    ) {
-                        VStack(spacing: 7) {
-                            settingsSecureField(
-                                label: "Anthropic key",
-                                placeholder: "Voice responses",
-                                systemImage: "waveform",
-                                value: Binding(
-                                    get: { userAnthropicAPIKey },
-                                    set: { newValue in
-                                        userAnthropicAPIKey = newValue
-                                        setAnthropicAPIKey(newValue)
+                        settingsSection(
+                            title: "Coding and actions model",
+                            subtitle: "Used when you say \"Hey Agent\", \"Clicky Agent\", or \"OpenClicky Agent\". The bundled Codex runtime uses local ChatGPT sign-in when no OpenAI key is set."
+                        ) {
+                            VStack(spacing: 7) {
+                                modelOptionGrid(
+                                    options: OpenClickyModelCatalog.codexActionsModels,
+                                    selectedModelID: session.model,
+                                    select: session.setModel
+                                )
+
+                                settingsActionButton(
+                                    title: "Open Agent dashboard",
+                                    systemImage: "rectangle.grid.2x2",
+                                    action: {
+                                        dismissSettings()
+                                        openHUD()
                                     }
                                 )
-                            )
+                            }
+                        }
 
-                            settingsSecureField(
-                                label: "ElevenLabs key",
-                                placeholder: "Voice playback",
-                                systemImage: "speaker.wave.2",
-                                value: Binding(
-                                    get: { userElevenLabsAPIKey },
-                                    set: { newValue in
-                                        userElevenLabsAPIKey = newValue
-                                        setElevenLabsAPIKey(newValue)
-                                    }
+                        settingsSection(
+                            title: "API keys",
+                            subtitle: "Optional overrides. Leave Anthropic or Codex blank to use local Claude Code or Codex sign-in when available."
+                        ) {
+                            VStack(spacing: 7) {
+                                settingsSecureField(
+                                    label: "Anthropic key",
+                                    placeholder: "Voice responses",
+                                    systemImage: "waveform",
+                                    value: Binding(
+                                        get: { userAnthropicAPIKey },
+                                        set: { newValue in
+                                            userAnthropicAPIKey = newValue
+                                            setAnthropicAPIKey(newValue)
+                                        }
+                                    )
                                 )
-                            )
 
-                            settingsSecureField(
-                                label: "AssemblyAI key",
-                                placeholder: "Streaming transcription",
-                                systemImage: "waveform",
-                                value: Binding(
-                                    get: { userAssemblyAIAPIKey },
-                                    set: { newValue in
-                                        userAssemblyAIAPIKey = newValue
-                                        setAssemblyAIAPIKey(newValue)
-                                    }
+                                settingsSecureField(
+                                    label: "ElevenLabs key",
+                                    placeholder: "Voice playback",
+                                    systemImage: "speaker.wave.2",
+                                    value: Binding(
+                                        get: { userElevenLabsAPIKey },
+                                        set: { newValue in
+                                            userElevenLabsAPIKey = newValue
+                                            setElevenLabsAPIKey(newValue)
+                                        }
+                                    )
                                 )
-                            )
 
-                            settingsSecureField(
-                                label: "Deepgram key",
-                                placeholder: "Streaming transcription",
-                                systemImage: "waveform",
-                                value: Binding(
-                                    get: { userDeepgramAPIKey },
-                                    set: { newValue in
-                                        userDeepgramAPIKey = newValue
-                                        setDeepgramAPIKey(newValue)
-                                    }
+                                settingsSecureField(
+                                    label: "AssemblyAI key",
+                                    placeholder: "Streaming transcription",
+                                    systemImage: "waveform",
+                                    value: Binding(
+                                        get: { userAssemblyAIAPIKey },
+                                        set: { newValue in
+                                            userAssemblyAIAPIKey = newValue
+                                            setAssemblyAIAPIKey(newValue)
+                                        }
+                                    )
                                 )
-                            )
 
-                            settingsTextField(
-                                label: "ElevenLabs voice ID",
-                                placeholder: "Voice ID",
-                                systemImage: "person.wave.2",
-                                value: Binding(
-                                    get: { userElevenLabsVoiceID },
-                                    set: { newValue in
-                                        userElevenLabsVoiceID = newValue
-                                        setElevenLabsVoiceID(newValue)
-                                    }
+                                settingsSecureField(
+                                    label: "Deepgram key",
+                                    placeholder: "Streaming transcription",
+                                    systemImage: "waveform",
+                                    value: Binding(
+                                        get: { userDeepgramAPIKey },
+                                        set: { newValue in
+                                            userDeepgramAPIKey = newValue
+                                            setDeepgramAPIKey(newValue)
+                                        }
+                                    )
                                 )
-                            )
 
-                            settingsSecureField(
-                                label: "Codex/OpenAI key",
-                                placeholder: "Coding and actions",
-                                systemImage: "terminal",
-                                value: Binding(
-                                    get: { userCodexAgentAPIKey },
-                                    set: { newValue in
-                                        userCodexAgentAPIKey = newValue
-                                        setCodexAgentAPIKey(newValue)
-                                    }
+                                settingsTextField(
+                                    label: "ElevenLabs voice ID",
+                                    placeholder: "Voice ID",
+                                    systemImage: "person.wave.2",
+                                    value: Binding(
+                                        get: { userElevenLabsVoiceID },
+                                        set: { newValue in
+                                            userElevenLabsVoiceID = newValue
+                                            setElevenLabsVoiceID(newValue)
+                                        }
+                                    )
                                 )
-                            )
+
+                                settingsSecureField(
+                                    label: "Codex/OpenAI key",
+                                    placeholder: "Coding and actions",
+                                    systemImage: "terminal",
+                                    value: Binding(
+                                        get: { userCodexAgentAPIKey },
+                                        set: { newValue in
+                                            userCodexAgentAPIKey = newValue
+                                            setCodexAgentAPIKey(newValue)
+                                        }
+                                    )
+                                )
+                            }
                         }
                     }
 
@@ -424,27 +448,29 @@ struct CodexAgentModeSettingsSheet: View {
                         }
                     }
 
-                    ClickyKnowledgeIndexSummaryView(index: knowledgeIndex, openMemory: openMemory)
+                    if isAdvancedModeEnabled {
+                        ClickyKnowledgeIndexSummaryView(index: knowledgeIndex, openMemory: openMemory)
 
-                    if let responseCard {
-                        ClickyResponseCardCompactView(
-                            card: responseCard,
-                            actionHandlers: ClickyResponseCardActionHandlers(
-                                dismiss: dismissResponseCard,
-                                runSuggestedNextAction: { actionTitle in
-                                    dismissSettings()
-                                    runSuggestedNextAction(actionTitle)
-                                },
-                                openTextFollowUp: {
-                                    dismissSettings()
-                                    openHUD()
-                                },
-                                openVoiceFollowUp: {
-                                    dismissSettings()
-                                    prepareVoiceFollowUp()
-                                }
+                        if let responseCard {
+                            ClickyResponseCardCompactView(
+                                card: responseCard,
+                                actionHandlers: ClickyResponseCardActionHandlers(
+                                    dismiss: dismissResponseCard,
+                                    runSuggestedNextAction: { actionTitle in
+                                        dismissSettings()
+                                        runSuggestedNextAction(actionTitle)
+                                    },
+                                    openTextFollowUp: {
+                                        dismissSettings()
+                                        openHUD()
+                                    },
+                                    openVoiceFollowUp: {
+                                        dismissSettings()
+                                        prepareVoiceFollowUp()
+                                    }
+                                )
                             )
-                        )
+                        }
                     }
 
                     settingsActionButton(
@@ -754,6 +780,37 @@ struct CodexAgentModeSettingsSheet: View {
             Text(value)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 8)
+    }
+
+    private var advancedModeToggleRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Advanced mode")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text("Shows dashboard controls and inline agent tools")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { isAdvancedModeEnabled },
+                set: { setAdvancedModeEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.7)
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 8)

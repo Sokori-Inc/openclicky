@@ -37,8 +37,8 @@ final class MenuBarPanelManager: NSObject {
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 356
-    private let panelHeight: CGFloat = 428
-    private let panelMinimumSize = NSSize(width: 356, height: 428)
+    private let panelHeight: CGFloat = 318
+    private let panelMinimumSize = NSSize(width: 356, height: 300)
     private let transientPanelScreenEdgePadding: CGFloat = 12
     private let transientPanelMaximumContentHeight: CGFloat = 720
 
@@ -52,15 +52,19 @@ final class MenuBarPanelManager: NSObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.hidePanel()
+            Task { @MainActor [weak self] in
+                self?.hidePanel()
+            }
         }
 
         contentSizeObserver = NotificationCenter.default.addObserver(
             forName: .clickyPanelContentSizeDidChange,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
-            self?.resizeVisiblePanelToCurrentContent()
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.resizeVisiblePanelToCurrentContent()
+            }
         }
     }
 
@@ -186,8 +190,6 @@ final class MenuBarPanelManager: NSObject {
         .frame(
             minWidth: panelWidth,
             maxWidth: .infinity,
-            minHeight: panelHeight,
-            maxHeight: .infinity,
             alignment: .topLeading
         )
 
@@ -217,7 +219,6 @@ final class MenuBarPanelManager: NSObject {
         menuBarPanel.titleVisibility = .hidden
         menuBarPanel.titlebarAppearsTransparent = true
         applyPanelMinimumSize(to: menuBarPanel)
-        menuBarPanel.setFrameAutosaveName("OpenClickyPinnedCompanionPanelV100ContentWrap")
 
         menuBarPanel.contentView = hostingView
         panel = menuBarPanel
@@ -283,8 +284,18 @@ final class MenuBarPanelManager: NSObject {
     }
 
     private func preferredPanelHeight(maximumPanelHeight: CGFloat, allowFittingSize: Bool = true) -> CGFloat {
-        let currentHeight = panel?.frame.height ?? panelHeight
-        return min(max(panelMinimumSize.height, currentHeight), maximumPanelHeight)
+        if allowFittingSize,
+           let panel,
+           let contentView = panel.contentView {
+            contentView.layoutSubtreeIfNeeded()
+            contentView.invalidateIntrinsicContentSize()
+            let fittingHeight = ceil(contentView.fittingSize.height)
+            if fittingHeight.isFinite, fittingHeight > 0 {
+                return min(max(panelMinimumSize.height, fittingHeight), maximumPanelHeight)
+            }
+        }
+
+        return min(max(panelMinimumSize.height, panelHeight), maximumPanelHeight)
     }
 
     private func resizePinnedPanelToCurrentContent() {

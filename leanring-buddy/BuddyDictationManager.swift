@@ -319,6 +319,20 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         )
     }
 
+    func startAutoSubmittingDictationFromMicrophoneButton(
+        currentDraftText: String,
+        updateDraftText: @escaping (String) -> Void,
+        submitDraftText: @escaping (String) -> Void
+    ) async {
+        await startPushToTalk(
+            startSource: .microphoneButton,
+            currentDraftText: currentDraftText,
+            updateDraftText: updateDraftText,
+            submitDraftText: submitDraftText,
+            shouldAutomaticallySubmitFinalDraftOnStop: true
+        )
+    }
+
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,

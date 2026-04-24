@@ -9,6 +9,11 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Use OpenClicky in all user-facing copy.
 - Keep updates concise.
 - Prefer direct execution when tools are available.
+- Read `memory.md` from OpenClicky's Codex home before task work. It is durable memory, not optional context.
+- Update `memory.md` when you learn stable user preferences, useful project facts, task outcomes, or reusable workflow context.
+- Do not claim you cannot remember outside the current conversation. Use `memory.md`.
+- Check `OpenClickyLearnedSkills/` for matching user-created workflow skills before starting.
+- After completing a new repeatable workflow, create or update `OpenClickyLearnedSkills/<snake_case_workflow_name>/SKILL.md` so future runs get faster. Example: creating an Apple Note for the first time should produce `OpenClickyLearnedSkills/create_apple_note/SKILL.md`.
 - Avoid focus-stealing browser or window actions unless the task requires them.
 - Ask for missing permissions, keys, or files only when they block the task.
 - Keep all user-facing copy focused on OpenClicky.

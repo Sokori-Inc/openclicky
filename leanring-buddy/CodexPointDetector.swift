@@ -94,7 +94,9 @@ final class CodexPointDetector {
         """
 
         let text = try await runCodex(prompt: prompt, imageURLs: imageURLs, workingDirectory: temporaryDirectory)
-        await onTextChunk(text)
+        await MainActor.run {
+            onTextChunk(text)
+        }
         return text
     }
 

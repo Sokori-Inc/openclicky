@@ -176,9 +176,9 @@ final class CompanionResponseOverlayManager {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.4
             overlayPanel.animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
+        }, completionHandler: { [self] in
             Task { @MainActor in
-                self?.hideOverlay()
+                hideOverlay()
             }
         })
     }
