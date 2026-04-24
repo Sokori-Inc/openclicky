@@ -57,7 +57,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()
-        // startSparkleUpdater()
+        startSparkleUpdater()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -85,16 +85,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     private func startSparkleUpdater() {
         let updaterController = SPUStandardUpdaterController(
-            startingUpdater: false,
+            startingUpdater: true,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
         self.sparkleUpdaterController = updaterController
-
-        do {
-            try updaterController.updater.start()
-        } catch {
-            print("OpenClicky: Sparkle updater failed to start: \(error)")
-        }
     }
 }

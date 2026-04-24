@@ -1677,7 +1677,7 @@ final class CompanionManager: ObservableObject {
         return "Research the current answer to this request and report back concisely: \(trimmedTranscript)"
     }
 
-    private static func implicitFilesystemTaskInstruction(from transcript: String) -> String? {
+    static func implicitFilesystemTaskInstruction(from transcript: String) -> String? {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else { return nil }
 
@@ -1740,7 +1740,7 @@ final class CompanionManager: ObservableObject {
         return "Inspect the relevant local files or folders and report back concisely: \(trimmedTranscript)"
     }
 
-    private static func filesystemTaskAcknowledgement(from transcript: String) -> String {
+    static func filesystemTaskAcknowledgement(from transcript: String) -> String {
         let normalizedTranscript = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
@@ -1796,7 +1796,7 @@ final class CompanionManager: ObservableObject {
         return storageTerms.contains { normalizedTranscript.contains($0) }
     }
 
-    private static func shouldEscalateVoiceResponseToAgent(responseText: String, transcript: String) -> Bool {
+    static func shouldEscalateVoiceResponseToAgent(responseText: String, transcript: String) -> Bool {
         let normalizedResponse = responseText
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()

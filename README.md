@@ -18,6 +18,7 @@ OpenClicky uses local configuration only. There is no Google login requirement a
 - `leanring-buddyUITests/` contains UI test scaffolding.
 - `AppResources/OpenClicky/` contains bundled model instructions, skills, wiki seed, Codex runtime, and completion audio.
 - `appcast.xml`, `clicky-demo.gif`, and `dmg-background.png` support distribution and release packaging.
+- `docs/APP_UPDATES.md` documents the Sparkle update feed and direct-distribution release flow.
 
 The legacy `leanring-buddy` folder and scheme names are kept for project continuity. The product, bundle display name, and app identity are OpenClicky.
 
@@ -73,6 +74,10 @@ Do not use terminal `xcodebuild` for permission testing. macOS TCC permissions a
 ## Development Verification
 
 For a lightweight syntax check that does not disturb macOS permissions, run `swiftc -parse` over the changed source files. Avoid launching unsigned or temporary build products for permission testing.
+
+## Direct Updates
+
+OpenClicky uses Sparkle for direct-distribution OTA updates. Installed builds check the signed `appcast.xml` feed from this repository's `main` branch, then download and install signed release DMGs from GitHub Releases. See [docs/APP_UPDATES.md](docs/APP_UPDATES.md) for the release checklist and appcast item template.
 
 ## Credits And Upstream Work
 

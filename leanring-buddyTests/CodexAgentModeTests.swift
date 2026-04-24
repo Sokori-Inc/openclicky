@@ -111,6 +111,28 @@ struct CodexAgentModeTests {
         #expect(FileManager.default.fileExists(atPath: store.reviewCommentsFile.path))
     }
 
+    @Test func voiceRoutingDetectsLocalFilesystemQuestions() throws {
+        let instruction = try #require(CompanionManager.implicitFilesystemTaskInstruction(from: "what's on my desktop?"))
+
+        #expect(instruction.contains("Inspect the relevant local files or folders"))
+        #expect(instruction.contains("what's on my desktop?"))
+        #expect(CompanionManager.filesystemTaskAcknowledgement(from: "list my desktop files") == "i'm checking your desktop now.")
+    }
+
+    @Test func voiceRoutingDoesNotTreatScreenQuestionsAsFilesystemTasks() throws {
+        #expect(CompanionManager.implicitFilesystemTaskInstruction(from: "what's on my screen?") == nil)
+        #expect(CompanionManager.implicitFilesystemTaskInstruction(from: "why are you not speaking?") == nil)
+    }
+
+    @Test func filesystemCapabilityRefusalEscalatesToAgentMode() throws {
+        let shouldEscalate = CompanionManager.shouldEscalateVoiceResponseToAgent(
+            responseText: "i don't have access to your file system directly, so i can't browse your desktop files.",
+            transcript: "what files are on my desktop?"
+        )
+
+        #expect(shouldEscalate)
+    }
+
     @Test func jsonRPCRequestEncodingMatchesCodexAppServer() throws {
         let request = CodexRPCRequest(id: 7, method: "thread/start", params: [
             "experimentalRawEvents": false,
